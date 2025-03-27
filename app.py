@@ -174,7 +174,7 @@ def main():
 
     if 'conversation_history' not in st.session_state:
         st.session_state.conversation_history = []
-    github_profile_link = "https://github.com/snsupratim/"
+    github_profile_link = "https://github.com/Aaryansingh20"
 
     st.sidebar.markdown(
         f"[![GitHub](https://img.shields.io/badge/GitHub-100000?style=for-the-badge&logo=github&logoColor=white)]({github_profile_link})"
