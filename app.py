@@ -116,13 +116,13 @@ def user_input(user_question, model_name, api_key, pdf_docs, conversation_histor
         </style>
         <div class="chat-message user">
             <div class="avatar">
-                <img src="https://i.ibb.co/CKpTnWr/user-icon-2048x2048-ihoxz4vq.png">
+                <img src="https://i.pinimg.com/736x/3c/ae/07/3cae079ca0b9e55ec6bfc1b358c9b1e2.jpg">
             </div>    
             <div class="message">{user_question_output}</div>
         </div>
         <div class="chat-message bot">
             <div class="avatar">
-                <img src="https://i.ibb.co/wNmYHsx/langchain-logo.webp" >
+                <img src="https://i.pinimg.com/736x/b2/8d/5d/b28d5d3c10668debab348d53802e9385.jpg" >
             </div>
             <div class="message">{response_output}</div>
             </div>
@@ -142,13 +142,13 @@ def user_input(user_question, model_name, api_key, pdf_docs, conversation_histor
             f"""
             <div class="chat-message user">
                 <div class="avatar">
-                    <img src="https://i.ibb.co/CKpTnWr/user-icon-2048x2048-ihoxz4vq.png">
+                    <img src="https://i.pinimg.com/736x/3c/ae/07/3cae079ca0b9e55ec6bfc1b358c9b1e2.jpg">
                 </div>    
                 <div class="message">{question}</div>
             </div>
             <div class="chat-message bot">
                 <div class="avatar">
-                    <img src="https://i.ibb.co/wNmYHsx/langchain-logo.webp" >
+                    <img src="https://i.pinimg.com/736x/b2/8d/5d/b28d5d3c10668debab348d53802e9385.jpg" >
                 </div>
                 <div class="message">{answer}</div>
             </div>
