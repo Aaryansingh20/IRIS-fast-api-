@@ -4,5 +4,6 @@
 
 #myenv/scripts/activate
 #pip install -r requirements.txt
+#pip install google-generativeai
 
 #streamlit run app.py
