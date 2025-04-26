@@ -159,36 +159,69 @@ def is_pdf_related_question(question, pdf_docs):
     if not pdf_docs:
         return False
     
-    pdf_names = [pdf.name for pdf in pdf_docs]
-    pdf_indicators = [
-        "pdf", "document", "file", "text", "content", "read", "extract",
-        "from the document", "in the pdf", "mentioned in"
-    ]
-    
-    # Check for PDF names in question
-    for name in pdf_names:
-        if name.lower().replace('.pdf', '') in question.lower():
-            return True
-    
-    # Check for PDF-related terms
-    for indicator in pdf_indicators:
-        if indicator.lower() in question.lower():
-            return True
-            
-    # If no PDFs are uploaded, or the question seems conversational
-    conversational_starters = [
+    # Common conversational starters and general questions that should ALWAYS be general
+    strictly_general_patterns = [
         "how are you", "what is your name", "tell me about yourself",
         "who are you", "what can you do", "hello", "hi ", "hey", "thanks",
         "thank you", "help me", "can you help", "I need help",
         "what's the weather", "who made you", "how do you work"
     ]
     
-    for starter in conversational_starters:
-        if starter.lower() in question.lower():
+    # Check for strictly general patterns first
+    question_lower = question.lower()
+    for pattern in strictly_general_patterns:
+        if question_lower.startswith(pattern):
             return False
-            
-    # Default behavior - if PDFs are uploaded, assume it's related to PDFs
-    return True if pdf_docs else False
+    
+    # PDF-specific indicators - if any of these are present, definitely use PDF
+    strong_pdf_indicators = [
+        "in the document", "in the pdf", "from the pdf",
+        "mentioned in", "according to", "in the text",
+        "the document says", "the pdf shows", "based on the pdf",
+        "what does the document", "can you find", "search for",
+        "from the document", "within the pdf", "inside the document"
+    ]
+    
+    # Check for strong PDF indicators
+    for indicator in strong_pdf_indicators:
+        if indicator in question_lower:
+            return True
+    
+    # Check if the question contains PDF file names
+    pdf_names = [pdf.name.lower().replace('.pdf', '') for pdf in pdf_docs]
+    for name in pdf_names:
+        if name in question_lower:
+            return True
+    
+    # For other cases, analyze the question more carefully
+    # Words that suggest we might want to search in PDFs
+    pdf_related_words = [
+        "document", "text", "content", "page", "section",
+        "paragraph", "chapter", "write", "discuss", "describe",
+        "explain", "analyze", "summarize", "find", "locate",
+        "where", "when", "who", "what", "which", "how"
+    ]
+    
+    # Count how many PDF-related words are in the question
+    pdf_word_count = sum(1 for word in pdf_related_words if word in question_lower)
+    
+    # If the question has multiple PDF-related words, prefer PDF search
+    if pdf_word_count >= 2:
+        return True
+    
+    # For longer questions (more than 6 words), prefer PDF search unless it's clearly general
+    words = question_lower.split()
+    if len(words) > 6:
+        # Look for patterns that suggest a general question
+        general_phrases = [
+            "what is", "explain to me", "tell me about",
+            "how does", "why does", "define"
+        ]
+        is_general = any(phrase in question_lower for phrase in general_phrases)
+        return not is_general
+    
+    # For shorter questions, prefer general unless it has PDF indicators
+    return False
 
 def get_direct_gemini_response(question, api_key, model_name="gemini-1.5-flash"):
     """Get a direct response from Gemini AI without RAG"""
@@ -204,8 +237,21 @@ def user_input(user_question, model_name, api_key, pdf_docs, conversation_histor
         st.warning("Please provide API key before processing.")
         return
     
-    # First, determine if this is a PDF-related question or general conversation
-    is_pdf_question = is_pdf_related_question(user_question, pdf_docs)
+    # Get the current chat mode
+    chat_mode = st.session_state.get('chat_mode', "Hybrid (Auto-detect)")
+    
+    # Determine if this is a PDF-related question based on mode and content
+    if chat_mode == "PDF Only":
+        use_pdf = True
+    elif chat_mode == "General Only":
+        use_pdf = False
+    else:  # Hybrid mode
+        use_pdf = is_pdf_related_question(user_question, pdf_docs)
+        # Log the decision in the sidebar for transparency
+        if use_pdf:
+            st.sidebar.info("Detected as PDF-related question - using PDF search")
+        else:
+            st.sidebar.info("Detected as general question - using direct Gemini")
     
     # Initialize RL agent if not already exists
     if rl_agent is None:
@@ -216,14 +262,13 @@ def user_input(user_question, model_name, api_key, pdf_docs, conversation_histor
         except:
             st.sidebar.info("Initialized new RL model")
     
-    # For general questions, use Gemini directly
-    if not is_pdf_question or not pdf_docs:
+    # For general questions or when in General Only mode
+    if not use_pdf or not pdf_docs:
         st.sidebar.info("Processing as a general question using direct Gemini response")
-        
         try:
             response_output = get_direct_gemini_response(user_question, api_key)
             
-            # Add to conversation history for general questions
+            # Add to conversation history
             pdf_names = [pdf.name for pdf in pdf_docs] if pdf_docs else []
             conversation_history.append((
                 user_question, 
@@ -235,70 +280,35 @@ def user_input(user_question, model_name, api_key, pdf_docs, conversation_histor
                 "N/A"
             ))
             
-            # Display the conversation
-            st.markdown(
-                f"""
-                <style>
-                    .chat-message {{
-                        padding: 1.5rem;
-                        border-radius: 0.5rem;
-                        margin-bottom: 1rem;
-                        display: flex;
-                    }}
-                    .chat-message.user {{
-                        background-color: #2b313e;
-                    }}
-                    .chat-message.bot {{
-                        background-color: #475063;
-                    }}
-                    .chat-message .avatar {{
-                        width: 20%;
-                    }}
-                    .chat-message .avatar img {{
-                        max-width: 78px;
-                        max-height: 78px;
-                        border-radius: 50%;
-                        object-fit: cover;
-                    }}
-                    .chat-message .message {{
-                        width: 80%;
-                        padding: 0 1.5rem;
-                        color: #fff;
-                    }}
-                    .chat-message .info {{
-                        font-size: 0.8rem;
-                        margin-top: 0.5rem;
-                        color: #ccc;
-                    }}
-                    .rl-info {{
-                        background-color: #3b4253;
-                        color: #fff;
-                        padding: 0.5rem;
-                        border-radius: 0.3rem;
-                        font-size: 0.8rem;
-                        margin-top: 0.5rem;
-                    }}
-                </style>
-                <div class="chat-message user">
-                    <div class="avatar">
-                        <img src="https://i.pinimg.com/736x/3c/ae/07/3cae079ca0b9e55ec6bfc1b358c9b1e2.jpg">
-                    </div>    
-                    <div class="message">{user_question}</div>
-                </div>
-                <div class="chat-message bot">
-                    <div class="avatar">
-                        <img src="https://i.pinimg.com/736x/b2/8d/5d/b28d5d3c10668debab348d53802e9385.jpg" >
-                    </div>
-                    <div class="message">
-                        {response_output}
-                        <div class="rl-info">
-                            Mode: Direct Gemini Query (Not using RAG)
+            # Display the complete conversation history in reverse order (newest first)
+            for i, (question, answer, model, timestamp, pdf_name, action, reward) in enumerate(reversed(conversation_history)):
+                # User message
+                user_html = f"""
+                    <div class="chat-message user">
+                        <div class="avatar">
+                            <img src="https://i.pinimg.com/736x/3c/ae/07/3cae079ca0b9e55ec6bfc1b358c9b1e2.jpg">
+                        </div>    
+                        <div class="message">
+                            <p>{question}</p>
                         </div>
                     </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+                """
+                st.markdown(user_html, unsafe_allow_html=True)
+                
+                # Bot message
+                mode_info = "Mode: Direct Gemini Query" if action == "direct_query" else f"RL Agent: Strategy = {action}, Reward = {reward}"
+                bot_html = f"""
+                    <div class="chat-message bot">
+                        <div class="avatar">
+                            <img src="https://i.pinimg.com/736x/b2/8d/5d/b28d5d3c10668debab348d53802e9385.jpg">
+                        </div>
+                        <div class="message">
+                            <p>{answer}</p>
+                            <span class="mode-info">{mode_info}</span>
+                        </div>
+                    </div>
+                """
+                st.markdown(bot_html, unsafe_allow_html=True)
             
             return rl_agent
             
@@ -374,12 +384,11 @@ def user_input(user_question, model_name, api_key, pdf_docs, conversation_histor
                 show_images = True
                 break
         
-        # Evaluate the response quality - in a real system, this could be based on user feedback
-        # For now, we'll use a simple heuristic based on response length and document similarity
+        # Evaluate the response quality
         doc_similarity_score = get_document_similarity(user_question, docs)
-        response_length_score = min(len(response_output) / 1000, 1.0)  # Normalize to 0-1
+        response_length_score = min(len(response_output) / 1000, 1.0)
         
-        # Combine scores - this is a simple heuristic, in a real system you'd use actual feedback
+        # Combine scores
         reward = (doc_similarity_score * 0.7) + (response_length_score * 0.3)
         
         # Update the RL model
@@ -394,70 +403,35 @@ def user_input(user_question, model_name, api_key, pdf_docs, conversation_histor
                                     datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
                                     ", ".join(pdf_names), chosen_action, f"{reward:.2f}"))
 
-        # Display the conversation
-        st.markdown(
-            f"""
-            <style>
-                .chat-message {{
-                    padding: 1.5rem;
-                    border-radius: 0.5rem;
-                    margin-bottom: 1rem;
-                    display: flex;
-                }}
-                .chat-message.user {{
-                    background-color: #2b313e;
-                }}
-                .chat-message.bot {{
-                    background-color: #475063;
-                }}
-                .chat-message .avatar {{
-                    width: 20%;
-                }}
-                .chat-message .avatar img {{
-                    max-width: 78px;
-                    max-height: 78px;
-                    border-radius: 50%;
-                    object-fit: cover;
-                }}
-                .chat-message .message {{
-                    width: 80%;
-                    padding: 0 1.5rem;
-                    color: #fff;
-                }}
-                .chat-message .info {{
-                    font-size: 0.8rem;
-                    margin-top: 0.5rem;
-                    color: #ccc;
-                }}
-                .rl-info {{
-                    background-color: #3b4253;
-                    color: #fff;
-                    padding: 0.5rem;
-                    border-radius: 0.3rem;
-                    font-size: 0.8rem;
-                    margin-top: 0.5rem;
-                }}
-            </style>
-            <div class="chat-message user">
-                <div class="avatar">
-                    <img src="https://i.pinimg.com/736x/3c/ae/07/3cae079ca0b9e55ec6bfc1b358c9b1e2.jpg">
-                </div>    
-                <div class="message">{user_question}</div>
-            </div>
-            <div class="chat-message bot">
-                <div class="avatar">
-                    <img src="https://i.pinimg.com/736x/b2/8d/5d/b28d5d3c10668debab348d53802e9385.jpg" >
-                </div>
-                <div class="message">
-                    {response_output}
-                    <div class="rl-info">
-                        RL Agent: Strategy = {chosen_action}, Reward = {reward:.2f}
+        # Display the complete conversation history in reverse order (newest first)
+        for i, (question, answer, model, timestamp, pdf_name, action, reward) in enumerate(reversed(conversation_history)):
+            # User message
+            user_html = f"""
+                <div class="chat-message user">
+                    <div class="avatar">
+                        <img src="https://i.pinimg.com/736x/3c/ae/07/3cae079ca0b9e55ec6bfc1b358c9b1e2.jpg">
+                    </div>    
+                    <div class="message">
+                        <p>{question}</p>
                     </div>
                 </div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+            """
+            st.markdown(user_html, unsafe_allow_html=True)
+            
+            # Bot message
+            mode_info = "Mode: Direct Gemini Query" if action == "direct_query" else f"RL Agent: Strategy = {action}, Reward = {reward}"
+            bot_html = f"""
+                <div class="chat-message bot">
+                    <div class="avatar">
+                        <img src="https://i.pinimg.com/736x/b2/8d/5d/b28d5d3c10668debab348d53802e9385.jpg">
+                    </div>
+                    <div class="message">
+                        <p>{answer}</p>
+                        <span class="mode-info">{mode_info}</span>
+                    </div>
+                </div>
+            """
+            st.markdown(bot_html, unsafe_allow_html=True)
         
         # Display images if requested and available
         if show_images and pdf_images:
@@ -466,43 +440,6 @@ def user_input(user_question, model_name, api_key, pdf_docs, conversation_histor
             for i, img_data in enumerate(pdf_images[:6]):  # Show up to 6 images
                 with image_cols[i % 3]:
                     st.image(img_data["image"], caption=f"From {img_data['filename']} (Page {img_data['page']})")
-                    
-        # Display previous conversation history
-        if len(conversation_history) > 1:
-            for i, (question, answer, model, timestamp, pdf_name, action, reward) in enumerate(reversed(conversation_history[:-1])):
-                st.markdown(
-                    f"""
-                    <div class="chat-message user">
-                        <div class="avatar">
-                            <img src="https://i.pinimg.com/736x/3c/ae/07/3cae079ca0b9e55ec6bfc1b358c9b1e2.jpg">
-                        </div>    
-                        <div class="message">{question}</div>
-                    </div>
-                    <div class="chat-message bot">
-                        <div class="avatar">
-                            <img src="https://i.pinimg.com/736x/b2/8d/5d/b28d5d3c10668debab348d53802e9385.jpg" >
-                        </div>
-                        <div class="message">
-                            {answer}
-                            <div class="rl-info">
-                                {"Mode: Direct Gemini Query" if action == "direct_query" else f"RL Agent: Strategy = {action}, Reward = {reward}"}
-                            </div>
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-        
-        # Provide download option for conversation history
-        if len(conversation_history) > 0:
-            df = pd.DataFrame(conversation_history, 
-                            columns=["Question", "Answer", "Model", "Timestamp", 
-                                    "PDF Name", "RL Strategy", "RL Reward"])
-            csv = df.to_csv(index=False)
-            b64 = base64.b64encode(csv.encode()).decode()  # Convert to base64
-            href = f'<a href="data:file/csv;base64,{b64}" download="conversation_history.csv"><button>Download conversation history as CSV file</button></a>'
-            st.sidebar.markdown(href, unsafe_allow_html=True)
-            st.markdown("To download the conversation, click the Download button on the left side at the bottom of the conversation.")
         
         return rl_agent
 
@@ -552,7 +489,7 @@ def main():
     st.set_page_config(page_title="IRIS", page_icon=":books:", layout="wide")
     st.header("IRIS")
 
-    # Setup session state
+    # Initialize session state variables
     if 'conversation_history' not in st.session_state:
         st.session_state.conversation_history = []
     
@@ -565,12 +502,59 @@ def main():
     
     if 'pdf_images' not in st.session_state:
         st.session_state.pdf_images = []
+
+    # API Key Management
+    DEFAULT_API_KEY = "AIzaSyCdjQ7pqIms0mGJ8uoINVOn3Y6LIXh0TgU"  # Gemini API key
     
-    # GitHub link
-    github_profile_link = "https://github.com/Aaryansingh20"
-    st.sidebar.markdown(
-        f"[![GitHub](https://img.shields.io/badge/GitHub-100000?style=for-the-badge&logo=github&logoColor=white)]({github_profile_link})"
-    )
+    if 'api_key' not in st.session_state:
+        st.session_state.api_key = DEFAULT_API_KEY
+
+    # Add CSS for chat messages and mode info
+    st.markdown("""
+        <style>
+            .chat-message {
+                padding: 1.5rem;
+                border-radius: 0.5rem;
+                margin-bottom: 1rem;
+                display: flex;
+                align-items: flex-start;
+            }
+            .chat-message.user {
+                background-color: #2b313e;
+            }
+            .chat-message.bot {
+                background-color: #475063;
+            }
+            .chat-message .avatar {
+                width: 15%;
+                margin-right: 24px;
+            }
+            .chat-message .avatar img {
+                max-width: 78px;
+                max-height: 78px;
+                border-radius: 50%;
+                object-fit: cover;
+                display: block;
+            }
+            .chat-message .message {
+                width: 85%;
+                padding: 0;
+                color: #fff;
+            }
+            .chat-message .message p {
+                margin: 0;
+            }
+            .mode-info {
+                background-color: #3b4253;
+                color: #fff;
+                padding: 0.5rem;
+                border-radius: 0.3rem;
+                font-size: 0.8rem;
+                margin-top: 0.5rem;
+                display: block;
+            }
+        </style>
+    """, unsafe_allow_html=True)
 
     # Tabs for different sections
     tab1, tab2, tab3 = st.tabs(["Chat", "RL Analysis", "Settings"])
@@ -578,13 +562,6 @@ def main():
     with tab1:
         # Chat interface
         model_name = "Google AI"  # Default model
-        
-        # API Key input
-        api_key = st.sidebar.text_input("Enter your Google API Key:", type="password")
-        st.sidebar.markdown("Click [here](https://ai.google.dev/) to get an API key.")
-        
-        if not api_key:
-            st.sidebar.warning("Please enter your Google API Key to proceed.")
         
         # Menu and control buttons
         with st.sidebar:
@@ -596,18 +573,18 @@ def main():
             clear_button = col1.button("Rerun")
 
             if reset_button:
-                st.session_state.conversation_history = []  # Clear conversation history
-                st.session_state.user_question = None  # Clear user question input 
-                st.session_state.rl_agent = RLAgent()  # Reinitialize RL agent
-                st.session_state.pdf_images = []  # Clear stored images
+                st.session_state.conversation_history = []
+                st.session_state.user_question = None
+                st.session_state.rl_agent = RLAgent()
+                st.session_state.pdf_images = []
                 st.experimental_rerun()
                 
             elif clear_button:
                 if 'user_question' in st.session_state:
                     st.warning("The previous query will be discarded.")
-                    st.session_state.user_question = ""  # Clear
+                    st.session_state.user_question = ""
                     if len(st.session_state.conversation_history) > 0:
-                        st.session_state.conversation_history.pop()  # Remove last query
+                        st.session_state.conversation_history.pop()
                 else:
                     st.warning("The question in the input will be queried again.")
 
@@ -625,7 +602,6 @@ def main():
             if st.button("Submit & Process"):
                 if pdf_docs:
                     with st.spinner("Processing PDFs and extracting images..."):
-                        # Extract text and images
                         text, images = extract_text_and_images(pdf_docs)
                         st.session_state.pdf_images = images
                         if images:
@@ -648,69 +624,56 @@ def main():
         if user_question:
             # Process user input based on mode
             if st.session_state.chat_mode == "PDF Only" and pdf_docs:
-                # Force PDF mode
                 st.session_state.rl_agent = user_input(
                     user_question, 
                     model_name, 
-                    api_key, 
+                    st.session_state.api_key, 
                     pdf_docs, 
                     st.session_state.conversation_history,
                     st.session_state.rl_agent,
                     st.session_state.pdf_images
                 )
             elif st.session_state.chat_mode == "General Only":
-                # Force general mode (set pdf_docs to None)
                 st.session_state.rl_agent = user_input(
                     user_question, 
                     model_name, 
-                    api_key, 
+                    st.session_state.api_key, 
                     None, 
                     st.session_state.conversation_history,
                     st.session_state.rl_agent,
                     []
                 )
             else:
-                # Auto-detect mode (default)
                 st.session_state.rl_agent = user_input(
                     user_question, 
                     model_name, 
-                    api_key, 
+                    st.session_state.api_key, 
                     pdf_docs, 
                     st.session_state.conversation_history,
                     st.session_state.rl_agent,
                     st.session_state.pdf_images
                 )
-            st.session_state.user_question = ""  # Clear user question input
     
     with tab2:
         # RL analysis and visualization
         show_rl_performance(st.session_state.rl_agent)
         
-        # Display Q-learning explanation
-        st.subheader("About Q-Learning in This Application")
-        # Continue from the end of the existing script, completing the Q-learning explanation
-        st.markdown("""
-        This application uses **Q-learning**, a model-free reinforcement learning algorithm, to optimize the document retrieval process.
-        
-        **How it works:**
-        1. **States**: Represented by question embeddings and document IDs
-        2. **Actions**: Different chunking strategies and retrieval methods
-        3. **Rewards**: Based on response quality and relevance
-        
-        The RL agent learns which chunking size and retrieval strategy work best for different types of questions and documents.
-        
-        **Key Components:**
-        - **Exploration vs. Exploitation**: Balances trying new strategies vs. using known good ones
-        - **Q-Table**: Stores the value of each action in each state
-        - **Learning Rate**: Controls how quickly the agent incorporates new information
-        - **Discount Factor**: Values future rewards vs. immediate ones
-        - **Reward Function**: Evaluates how good each action was
-        """)
-    
     with tab3:
         # Settings and configuration
         st.subheader("Application Settings")
         
+        # API Key settings
+        st.write("### API Key Configuration")
+        show_api_key = st.checkbox("Show API Key", value=False)
+        current_api_key = st.text_input(
+            "Google API Key",
+            value=st.session_state.api_key,
+            type="" if show_api_key else "password"
+        )
+        if current_api_key != st.session_state.api_key:
+            st.session_state.api_key = current_api_key
+            st.success("API Key updated successfully!")
+
         # Model settings
         st.write("### Model Settings")
         gemini_model = st.selectbox(
@@ -857,283 +820,6 @@ def enhanced_direct_gemini_response(question, api_key, model_name="gemini-1.5-fl
     response = model.generate_content(question)
     
     return response.text
-
-# Update the user_input function to use the enhanced Gemini response
-def user_input(user_question, model_name, api_key, pdf_docs, conversation_history, rl_agent, pdf_images):
-    if api_key is None:
-        st.warning("Please provide API key before processing.")
-        return
-    
-    # First, determine if this is a PDF-related question or general conversation
-    is_pdf_question = is_pdf_related_question(user_question, pdf_docs)
-    
-    # Initialize RL agent if not already exists
-    if rl_agent is None:
-        rl_agent = RLAgent()
-        try:
-            rl_agent.load_model()
-            st.sidebar.success("Loaded existing RL model")
-        except:
-            st.sidebar.info("Initialized new RL model")
-    
-    # For general questions, use Gemini directly with enhanced functionality
-    if not is_pdf_question or not pdf_docs:
-        st.sidebar.info("Processing as a general question using direct Gemini response")
-        
-        try:
-            # Use enhanced Gemini response function
-            response_output = enhanced_direct_gemini_response(
-                user_question, 
-                api_key,
-                model_name=st.session_state.get('gemini_model', 'gemini-1.5-flash'),
-                temperature=st.session_state.get('temperature', 0.3),
-                max_tokens=st.session_state.get('max_tokens', 4096)
-            )
-            
-            # Add to conversation history for general questions
-            pdf_names = [pdf.name for pdf in pdf_docs] if pdf_docs else []
-            conversation_history.append((
-                user_question, 
-                response_output, 
-                "Direct " + model_name, 
-                datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
-                ", ".join(pdf_names), 
-                "direct_query", 
-                "N/A"
-            ))
-            
-            # Display the conversation
-            st.markdown(
-                f"""
-                <style>
-                    .chat-message {{
-                        padding: 1.5rem;
-                        border-radius: 0.5rem;
-                        margin-bottom: 1rem;
-                        display: flex;
-                    }}
-                    .chat-message.user {{
-                        background-color: #2b313e;
-                    }}
-                    .chat-message.bot {{
-                        background-color: #475063;
-                    }}
-                    .chat-message .avatar {{
-                        width: 20%;
-                    }}
-                    .chat-message .avatar img {{
-                        max-width: 78px;
-                        max-height: 78px;
-                        border-radius: 50%;
-                        object-fit: cover;
-                    }}
-                    .chat-message .message {{
-                        width: 80%;
-                        padding: 0 1.5rem;
-                        color: #fff;
-                    }}
-                    .chat-message .info {{
-                        font-size: 0.8rem;
-                        margin-top: 0.5rem;
-                        color: #ccc;
-                    }}
-                    .rl-info {{
-                        background-color: #3b4253;
-                        color: #fff;
-                        padding: 0.5rem;
-                        border-radius: 0.3rem;
-                        font-size: 0.8rem;
-                        margin-top: 0.5rem;
-                    }}
-                </style>
-                <div class="chat-message user">
-                    <div class="avatar">
-                        <img src="https://i.pinimg.com/736x/3c/ae/07/3cae079ca0b9e55ec6bfc1b358c9b1e2.jpg">
-                    </div>    
-                    <div class="message">{user_question}</div>
-                </div>
-                <div class="chat-message bot">
-                    <div class="avatar">
-                        <img src="https://i.pinimg.com/736x/b2/8d/5d/b28d5d3c10668debab348d53802e9385.jpg" >
-                    </div>
-                    <div class="message">
-                        {response_output}
-                        <div class="rl-info">
-                            Mode: Direct Gemini Query (Enhanced)
-                        </div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-            
-            return rl_agent
-            
-        except Exception as e:
-            st.error(f"Error getting response from Gemini: {str(e)}")
-            return rl_agent
-    
-    # For PDF-related questions, use the RAG system with RL (this part remains the same as in your original code)
-    else:
-        # Rest of your existing code for PDF processing remains unchanged
-        # ...
-        
-        # Processing the text from PDFs
-        raw_text = get_pdf_text(pdf_docs)
-        
-        # Use RL agent to decide on chunking strategy
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
-        question_embedding = embeddings.embed_query(user_question)
-        
-        # Create a simple state representation
-        doc_ids = [pdf.name[:5] for pdf in pdf_docs]
-        state_key = rl_agent.get_state_key(question_embedding, doc_ids)
-        
-        # Available actions for text chunking and retrieval
-        chunking_actions = ["chunk_small", "chunk_medium", "chunk_large"]
-        retrieval_actions = ["similarity_standard", "similarity_mmr"]
-        available_actions = chunking_actions + retrieval_actions
-        
-        # Choose action based on current state
-        chosen_action = rl_agent.choose_action(state_key, available_actions)
-        
-        # Apply the chosen chunking strategy
-        if chosen_action == "chunk_small":
-            text_chunks = get_text_chunks(raw_text, chunk_size=5000, chunk_overlap=500)
-            st.sidebar.info("RL Agent chose: Small chunks (5000 chars)")
-        elif chosen_action == "chunk_medium":
-            text_chunks = get_text_chunks(raw_text, chunk_size=10000, chunk_overlap=1000)
-            st.sidebar.info("RL Agent chose: Medium chunks (10000 chars)")
-        else:  # chunk_large
-            text_chunks = get_text_chunks(raw_text, chunk_size=15000, chunk_overlap=1500)
-            st.sidebar.info("RL Agent chose: Large chunks (15000 chars)")
-        
-        # Create vector store with the chunks
-        vector_store, embeddings = get_vector_store(text_chunks, model_name, api_key)
-        
-        # Load the vector store
-        new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-        
-        # Apply the chosen retrieval strategy
-        if chosen_action in retrieval_actions:
-            if chosen_action == "similarity_standard":
-                docs = new_db.similarity_search(user_question)
-                st.sidebar.info("RL Agent chose: Standard similarity search")
-            else:  # similarity_mmr
-                docs = new_db.max_marginal_relevance_search(user_question, k=4, fetch_k=10)
-                st.sidebar.info("RL Agent chose: MMR similarity search (diversity-focused)")
-        else:
-            # Default to standard similarity search if a chunking action was chosen
-            docs = new_db.similarity_search(user_question)
-        
-        # Get answer from LLM
-        chain = get_conversational_chain("Google AI", vectorstore=new_db, api_key=api_key)
-        response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
-        
-        response_output = response['output_text']
-        
-        # Check if question is about images
-        show_images = False
-        image_related_terms = ["image", "picture", "photo", "figure", "diagram", "illustration", "visual"]
-        for term in image_related_terms:
-            if term in user_question.lower():
-                show_images = True
-                break
-        
-        # Evaluate the response quality - in a real system, this could be based on user feedback
-        # For now, we'll use a simple heuristic based on response length and document similarity
-        doc_similarity_score = get_document_similarity(user_question, docs)
-        response_length_score = min(len(response_output) / 1000, 1.0)  # Normalize to 0-1
-        
-        # Combine scores - this is a simple heuristic, in a real system you'd use actual feedback
-        reward = (doc_similarity_score * 0.7) + (response_length_score * 0.3)
-        
-        # Update the RL model
-        rl_agent.update_q_value(state_key, chosen_action, reward)
-        
-        # Save the updated model
-        rl_agent.save_model()
-        
-        # Add to conversation history
-        pdf_names = [pdf.name for pdf in pdf_docs] if pdf_docs else []
-        conversation_history.append((user_question, response_output, model_name, 
-                                    datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
-                                    ", ".join(pdf_names), chosen_action, f"{reward:.2f}"))
-
-        # Display the conversation
-        st.markdown(
-            f"""
-            <style>
-                .chat-message {{
-                    padding: 1.5rem;
-                    border-radius: 0.5rem;
-                    margin-bottom: 1rem;
-                    display: flex;
-                }}
-                .chat-message.user {{
-                    background-color: #2b313e;
-                }}
-                .chat-message.bot {{
-                    background-color: #475063;
-                }}
-                .chat-message .avatar {{
-                    width: 20%;
-                }}
-                .chat-message .avatar img {{
-                    max-width: 78px;
-                    max-height: 78px;
-                    border-radius: 50%;
-                    object-fit: cover;
-                }}
-                .chat-message .message {{
-                    width: 80%;
-                    padding: 0 1.5rem;
-                    color: #fff;
-                }}
-                .chat-message .info {{
-                    font-size: 0.8rem;
-                    margin-top: 0.5rem;
-                    color: #ccc;
-                }}
-                .rl-info {{
-                    background-color: #3b4253;
-                    color: #fff;
-                    padding: 0.5rem;
-                    border-radius: 0.3rem;
-                    font-size: 0.8rem;
-                    margin-top: 0.5rem;
-                }}
-            </style>
-            <div class="chat-message user">
-                <div class="avatar">
-                    <img src="https://i.pinimg.com/736x/3c/ae/07/3cae079ca0b9e55ec6bfc1b358c9b1e2.jpg">
-                </div>    
-                <div class="message">{user_question}</div>
-            </div>
-            <div class="chat-message bot">
-                <div class="avatar">
-                    <img src="https://i.pinimg.com/736x/b2/8d/5d/b28d5d3c10668debab348d53802e9385.jpg" >
-                </div>
-                <div class="message">
-                    {response_output}
-                    <div class="rl-info">
-                        RL Agent: Strategy = {chosen_action}, Reward = {reward:.2f}
-                    </div>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-        
-        # Display images if requested and available
-        if show_images and pdf_images:
-            st.write("### Related Images from Documents:")
-            image_cols = st.columns(3)
-            for i, img_data in enumerate(pdf_images[:6]):  # Show up to 6 images
-                with image_cols[i % 3]:
-                    st.image(img_data["image"], caption=f"From {img_data['filename']} (Page {img_data['page']})")
-        
-        return rl_agent
 
 if __name__ == "__main__":
     main()
