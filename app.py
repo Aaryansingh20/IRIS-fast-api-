@@ -9,6 +9,7 @@ import json
 import io
 from PIL import Image
 from datetime import datetime
+import docx
 
 # Update imports for LangChain
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -77,34 +78,42 @@ class RLAgent:
             with open(filepath, 'r') as f:
                 self.q_table = json.load(f)
 
-def extract_text_and_images(pdf_docs):
-    """Extract both text and images from PDF documents"""
+import asyncio
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
+def extract_text_from_docx(docx_file):
+    doc = docx.Document(docx_file)
+    text = "\n".join([para.text for para in doc.paragraphs])
+    return text
+
+def extract_text_and_images(files):
+    """Extract both text and images from PDF and DOCX documents"""
     text = ""
     images = []
-    
-    for pdf in pdf_docs:
-        pdf_reader = PdfReader(pdf)
-        for page_num, page in enumerate(pdf_reader.pages):
-            # Extract text
-            text += page.extract_text() + "\n"
-            
-            # Extract images
-            if '/XObject' in page['/Resources']:
-                xobjects = page['/Resources']['/XObject'].get_object()
-                for obj in xobjects:
-                    if xobjects[obj]['/Subtype'] == '/Image':
-                        try:
-                            data = xobjects[obj].get_data()
-                            image = Image.open(io.BytesIO(data))
-                            images.append({
-                                "image": image,
-                                "page": page_num + 1,
-                                "filename": pdf.name
-                            })
-                        except:
-                            # Some images might not be processable, we'll skip them
-                            pass
-    
+    for file in files:
+        if file.name.lower().endswith(".pdf"):
+            pdf_reader = PdfReader(file)
+            for page_num, page in enumerate(pdf_reader.pages):
+                text += page.extract_text() + "\n"
+                if '/XObject' in page['/Resources']:
+                    xobjects = page['/Resources']['/XObject'].get_object()
+                    for obj in xobjects:
+                        if xobjects[obj]['/Subtype'] == '/Image':
+                            try:
+                                data = xobjects[obj].get_data()
+                                image = Image.open(io.BytesIO(data))
+                                images.append({
+                                    "image": image,
+                                    "page": page_num + 1,
+                                    "filename": file.name
+                                })
+                            except:
+                                pass
+        elif file.name.lower().endswith(".docx"):
+            text += extract_text_from_docx(file) + "\n"
     return text, images
 
 def get_pdf_text(pdf_docs):
@@ -232,7 +241,7 @@ def get_direct_gemini_response(question, api_key, model_name="gemini-1.5-flash")
     
     return response.text
 
-def user_input(user_question, model_name, api_key, pdf_docs, conversation_history, rl_agent, pdf_images):
+def user_input(user_question, model_name, api_key, uploaded_files, conversation_history, rl_agent, pdf_images):
     if api_key is None:
         st.warning("Please provide API key before processing.")
         return
@@ -246,7 +255,7 @@ def user_input(user_question, model_name, api_key, pdf_docs, conversation_histor
     elif chat_mode == "General Only":
         use_pdf = False
     else:  # Hybrid mode
-        use_pdf = is_pdf_related_question(user_question, pdf_docs)
+        use_pdf = is_pdf_related_question(user_question, uploaded_files)
         # Log the decision in the sidebar for transparency
         if use_pdf:
             st.sidebar.info("Detected as PDF-related question - using PDF search")
@@ -263,13 +272,13 @@ def user_input(user_question, model_name, api_key, pdf_docs, conversation_histor
             st.sidebar.info("Initialized new RL model")
     
     # For general questions or when in General Only mode
-    if not use_pdf or not pdf_docs:
+    if not use_pdf or not uploaded_files:
         st.sidebar.info("Processing as a general question using direct Gemini response")
         try:
             response_output = get_direct_gemini_response(user_question, api_key)
             
             # Add to conversation history
-            pdf_names = [pdf.name for pdf in pdf_docs] if pdf_docs else []
+            pdf_names = [file.name for file in uploaded_files] if uploaded_files else []
             conversation_history.append((
                 user_question, 
                 response_output, 
@@ -318,19 +327,24 @@ def user_input(user_question, model_name, api_key, pdf_docs, conversation_histor
     
     # For PDF-related questions, use the RAG system with RL
     else:
-        if pdf_docs is None:
+        if uploaded_files is None:
             st.warning("Please upload PDF files for document-related questions.")
             return
         
         # Process the text from PDFs
-        raw_text = get_pdf_text(pdf_docs)
+        raw_text = ""
+        for file in uploaded_files:
+            if file.name.lower().endswith(".pdf"):
+                raw_text += get_pdf_text([file])
+            elif file.name.lower().endswith(".docx"):
+                raw_text += extract_text_from_docx(file)
         
         # Use RL agent to decide on chunking strategy
         embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
         question_embedding = embeddings.embed_query(user_question)
         
         # Create a simple state representation
-        doc_ids = [pdf.name[:5] for pdf in pdf_docs]
+        doc_ids = [file.name[:5] for file in uploaded_files]
         state_key = rl_agent.get_state_key(question_embedding, doc_ids)
         
         # Available actions for text chunking and retrieval
@@ -398,7 +412,7 @@ def user_input(user_question, model_name, api_key, pdf_docs, conversation_histor
         rl_agent.save_model()
         
         # Add to conversation history
-        pdf_names = [pdf.name for pdf in pdf_docs] if pdf_docs else []
+        pdf_names = [file.name for file in uploaded_files] if uploaded_files else []
         conversation_history.append((user_question, response_output, model_name, 
                                     datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
                                     ", ".join(pdf_names), chosen_action, f"{reward:.2f}"))
@@ -598,11 +612,15 @@ def main():
             st.session_state.rl_agent.exploration_rate = exploration_rate
             
             # File uploader
-            pdf_docs = st.file_uploader("Upload PDF Files and Click Process", accept_multiple_files=True)
+            uploaded_files = st.file_uploader(
+                "Upload PDF or Word Files and Click Process",
+                type=["pdf", "docx"],
+                accept_multiple_files=True
+            )
             if st.button("Submit & Process"):
-                if pdf_docs:
+                if uploaded_files:
                     with st.spinner("Processing PDFs and extracting images..."):
-                        text, images = extract_text_and_images(pdf_docs)
+                        text, images = extract_text_and_images(uploaded_files)
                         st.session_state.pdf_images = images
                         if images:
                             st.success(f"PDFs processed successfully! Extracted {len(images)} images.")
@@ -623,12 +641,12 @@ def main():
 
         if user_question:
             # Process user input based on mode
-            if st.session_state.chat_mode == "PDF Only" and pdf_docs:
+            if st.session_state.chat_mode == "PDF Only" and uploaded_files:
                 st.session_state.rl_agent = user_input(
                     user_question, 
                     model_name, 
                     st.session_state.api_key, 
-                    pdf_docs, 
+                    uploaded_files, 
                     st.session_state.conversation_history,
                     st.session_state.rl_agent,
                     st.session_state.pdf_images
@@ -648,7 +666,7 @@ def main():
                     user_question, 
                     model_name, 
                     st.session_state.api_key, 
-                    pdf_docs, 
+                    uploaded_files, 
                     st.session_state.conversation_history,
                     st.session_state.rl_agent,
                     st.session_state.pdf_images
