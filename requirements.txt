@@ -8,7 +8,7 @@ google-ai-generativelanguage
 langchain-community
 pandas
 python-docx
-
+google-generativeai
 
 
 
