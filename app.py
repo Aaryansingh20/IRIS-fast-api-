@@ -10,6 +10,7 @@ import io
 from PIL import Image
 from datetime import datetime
 import docx
+from dotenv import load_dotenv
 
 # Update imports for LangChain
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -518,10 +519,10 @@ def main():
         st.session_state.pdf_images = []
 
     # API Key Management
-    DEFAULT_API_KEY = "AIzaSyCdjQ7pqIms0mGJ8uoINVOn3Y6LIXh0TgU"  # Gemini API key
-    
+    load_dotenv()
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
     if 'api_key' not in st.session_state:
-        st.session_state.api_key = DEFAULT_API_KEY
+        st.session_state.api_key = GEMINI_API_KEY
 
     # Add CSS for chat messages and mode info
     st.markdown("""
