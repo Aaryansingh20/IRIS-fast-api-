@@ -9,6 +9,6 @@ langchain-community
 pandas
 python-docx
 google-generativeai
-
+google-generativeai-tools
 
 
