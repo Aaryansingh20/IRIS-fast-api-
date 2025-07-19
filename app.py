@@ -10,7 +10,6 @@ import io
 from PIL import Image
 from datetime import datetime
 import docx
-from dotenv import load_dotenv
 
 # Update imports for LangChain
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -159,7 +158,9 @@ def get_conversational_chain(model_name, vectorstore=None, api_key=None):
 
         Answer:
         """
-        model = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3, google_api_key=api_key)
+        # Use the selected Gemini model from session state, default to gemini-2.5-pro if not set
+        selected_model = st.session_state.get('gemini_model', 'gemini-2.5-pro')
+        model = ChatGoogleGenerativeAI(model=selected_model, temperature=0.3, google_api_key=api_key)
         prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
         chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
         return chain
@@ -236,8 +237,9 @@ def is_pdf_related_question(question, pdf_docs):
 def get_direct_gemini_response(question, api_key, model_name="gemini-1.5-flash"):
     """Get a direct response from Gemini AI without RAG"""
     genai.configure(api_key=api_key)
-    
-    model = genai.GenerativeModel(model_name)
+    # Use the selected Gemini model from session state, default to gemini-2.5-pro if not set
+    selected_model = st.session_state.get('gemini_model', 'gemini-2.5-pro')
+    model = genai.GenerativeModel(selected_model)
     response = model.generate_content(question)
     
     return response.text
@@ -339,6 +341,11 @@ def user_input(user_question, model_name, api_key, uploaded_files, conversation_
                 raw_text += get_pdf_text([file])
             elif file.name.lower().endswith(".docx"):
                 raw_text += extract_text_from_docx(file)
+        
+        # Check if any text was extracted
+        if not raw_text.strip():
+            st.warning("No text could be extracted from the uploaded files. Please check your files and try again.")
+            return rl_agent
         
         # Use RL agent to decide on chunking strategy
         embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
@@ -519,10 +526,10 @@ def main():
         st.session_state.pdf_images = []
 
     # API Key Management
-    load_dotenv()
-    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+    DEFAULT_API_KEY = "AIzaSyCdjQ7pqIms0mGJ8uoINVOn3Y6LIXh0TgU"  # Gemini API key
+    
     if 'api_key' not in st.session_state:
-        st.session_state.api_key = GEMINI_API_KEY
+        st.session_state.api_key = DEFAULT_API_KEY
 
     # Add CSS for chat messages and mode info
     st.markdown("""
@@ -681,23 +688,11 @@ def main():
         # Settings and configuration
         st.subheader("Application Settings")
         
-        # API Key settings
-        st.write("### API Key Configuration")
-        show_api_key = st.checkbox("Show API Key", value=False)
-        current_api_key = st.text_input(
-            "Google API Key",
-            value=st.session_state.api_key,
-            type="" if show_api_key else "password"
-        )
-        if current_api_key != st.session_state.api_key:
-            st.session_state.api_key = current_api_key
-            st.success("API Key updated successfully!")
-
         # Model settings
         st.write("### Model Settings")
         gemini_model = st.selectbox(
             "Select Gemini Model", 
-            ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.0-pro"],
+            ["gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.0-pro"],
             index=0
         )
         
@@ -738,17 +733,15 @@ def main():
 def get_image_from_gemini(prompt, api_key, model="gemini-1.5-flash", size="512x512", style="natural"):
     """Generate image description using Gemini multimodal capabilities"""
     genai.configure(api_key=api_key)
-    
     # Since Gemini doesn't directly generate images, we'll create a detailed image description
     # that could be used with other image generation services
-    
     image_prompt = f"""Generate a detailed description for an image based on this prompt: 
     '{prompt}'. The description should be in the {style} style and optimized for a {size} resolution.
     Make the description visual and detailed so it can be understood easily."""
-    
-    model_obj = genai.GenerativeModel(model)
+    # Use the selected Gemini model from session state, default to gemini-2.5-pro if not set
+    selected_model = st.session_state.get('gemini_model', 'gemini-2.5-pro')
+    model_obj = genai.GenerativeModel(selected_model)
     response = model_obj.generate_content(image_prompt)
-    
     return response.text
 
 def process_image_request(question, api_key):
@@ -788,21 +781,14 @@ def process_image_request(question, api_key):
 def enhanced_direct_gemini_response(question, api_key, model_name="gemini-1.5-flash", temperature=0.3, max_tokens=4096):
     """Enhanced direct response from Gemini AI with better configuration"""
     genai.configure(api_key=api_key)
-    
     # First check if this is an image generation request
     is_image_request, image_content = process_image_request(question, api_key)
-    
     if is_image_request:
         return f"""I've created an image description based on your request:
-        
         ---
-        
         {image_content}
-        
         ---
-        
         Note: Since I can't directly generate images, I've provided a detailed description that could be used with image generation tools."""
-    
     # For regular text queries
     generation_config = {
         "temperature": temperature,
@@ -810,7 +796,6 @@ def enhanced_direct_gemini_response(question, api_key, model_name="gemini-1.5-fl
         "top_k": 40,
         "max_output_tokens": max_tokens,
     }
-    
     safety_settings = [
         {
             "category": "HARM_CATEGORY_HARASSMENT",
@@ -829,15 +814,14 @@ def enhanced_direct_gemini_response(question, api_key, model_name="gemini-1.5-fl
             "threshold": "BLOCK_MEDIUM_AND_ABOVE"
         }
     ]
-    
+    # Use the selected Gemini model from session state, default to gemini-2.5-pro if not set
+    selected_model = st.session_state.get('gemini_model', 'gemini-2.5-pro')
     model = genai.GenerativeModel(
-        model_name,
+        selected_model,
         generation_config=generation_config,
         safety_settings=safety_settings
     )
-    
     response = model.generate_content(question)
-    
     return response.text
 
 if __name__ == "__main__":
