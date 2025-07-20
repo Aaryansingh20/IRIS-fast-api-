@@ -7,5 +7,5 @@
 GEMINI_API_KEY=" add you API "
 #pip install -r requirements.txt
 #pip install google-generativeai
-
+#uvicorn api:app --reload
 #streamlit run app.py
