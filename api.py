@@ -145,7 +145,9 @@ def get_direct_gemini_response(question, api_key, model_name="gemini-2.5-pro"):
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://iris-navy.vercel.app"
+    ],  # Allow only the deployed frontend
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
