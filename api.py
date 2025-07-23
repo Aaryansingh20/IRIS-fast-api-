@@ -4,7 +4,7 @@ import docx
 from PyPDF2 import PdfReader
 from fastapi import FastAPI, File, UploadFile, Form, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from typing import List, Optional
 import json
 import random
@@ -146,8 +146,9 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://iris-navy.vercel.app"
-    ],  # Allow only the deployed frontend
+        "https://iris-navy.vercel.app",
+        "http://localhost:3000"
+    ],  # Allow deployed and local frontend
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -254,6 +255,84 @@ async def chat(
         except Exception as e:
             print("Gemini error:", e)
             return JSONResponse(content={"response": f"Error from Gemini: {str(e)}"})
+
+@app.post("/chat-stream")
+async def chat_stream(
+    message: str = Form(...),
+    files: Optional[List[UploadFile]] = File(None)
+):
+    docs = []
+    if files:
+        for file in files:
+            filename = file.filename.lower()
+            content = await file.read()
+            if filename.endswith(".pdf"):
+                text = extract_text_from_pdf(io.BytesIO(content))
+            elif filename.endswith(".docx"):
+                text = extract_text_from_docx(io.BytesIO(content))
+            else:
+                continue
+            docs.append({"filename": file.filename, "text": text})
+    else:
+        docs = DOCUMENTS  # fallback to in-memory if no files sent
+
+    use_pdf = len(docs) > 0
+    if use_pdf:
+        raw_text = "".join([doc["text"] for doc in docs])
+        if not raw_text.strip():
+            def error_gen():
+                yield "No text could be extracted from the uploaded files."
+            return StreamingResponse(error_gen(), media_type="text/plain")
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GEMINI_API_KEY)
+        question_embedding = embeddings.embed_query(message)
+        doc_ids = [doc["filename"][:5] for doc in docs]
+        state_key = RL_AGENT.get_state_key(question_embedding, doc_ids)
+        chunking_actions = ["chunk_small", "chunk_medium", "chunk_large"]
+        retrieval_actions = ["similarity_standard", "similarity_mmr"]
+        available_actions = chunking_actions + retrieval_actions
+        chosen_action = RL_AGENT.choose_action(state_key, available_actions)
+        if chosen_action == "chunk_small":
+            text_chunks = get_text_chunks(raw_text, chunk_size=5000, chunk_overlap=500)
+        elif chosen_action == "chunk_medium":
+            text_chunks = get_text_chunks(raw_text, chunk_size=10000, chunk_overlap=1000)
+        else:
+            text_chunks = get_text_chunks(raw_text, chunk_size=15000, chunk_overlap=1500)
+        vector_store, embeddings = get_vector_store(text_chunks, api_key=GEMINI_API_KEY)
+        new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+        if chosen_action in retrieval_actions:
+            if chosen_action == "similarity_standard":
+                docs_retrieved = new_db.similarity_search(message)
+            else:
+                docs_retrieved = new_db.max_marginal_relevance_search(message, k=4, fetch_k=10)
+        else:
+            docs_retrieved = new_db.similarity_search(message)
+        chain = get_conversational_chain(api_key=GEMINI_API_KEY)
+        response = chain({"input_documents": docs_retrieved, "question": message}, return_only_outputs=True)
+        response_output = response['output_text']
+        # Fallback to direct Gemini if RAG answer is empty or says not found
+        if not response_output or "answer is not available in the context" in response_output.lower():
+            response_output = get_direct_gemini_response(message, GEMINI_API_KEY)
+        doc_similarity_score = 1.0 if response_output else 0.0
+        response_length_score = min(len(response_output) / 1000, 1.0)
+        reward = (doc_similarity_score * 0.7) + (response_length_score * 0.3)
+        RL_AGENT.update_q_value(state_key, chosen_action, reward)
+        RL_AGENT.save_model()
+        def stream_gen():
+            # Simulate streaming by yielding chunks of the response
+            for i in range(0, len(response_output), 20):
+                yield response_output[i:i+20]
+        return StreamingResponse(stream_gen(), media_type="text/plain")
+    else:
+        try:
+            response_output = get_direct_gemini_response(message, GEMINI_API_KEY)
+            def stream_gen():
+                for i in range(0, len(response_output), 20):
+                    yield response_output[i:i+20]
+            return StreamingResponse(stream_gen(), media_type="text/plain")
+        except Exception as e:
+            def error_gen():
+                yield f"Error from Gemini: {str(e)}"
+            return StreamingResponse(error_gen(), media_type="text/plain")
 
 # Add image generation endpoint using Gemini 2.5
 @app.post("/generate-image")
