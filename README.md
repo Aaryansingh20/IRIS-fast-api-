@@ -9,3 +9,5 @@ GEMINI_API_KEY=" add you API "
 #pip install google-generativeai
 #uvicorn api:app --reload
 #streamlit run app.py
+
+#live link : https://iris-navy.vercel.app/
