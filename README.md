@@ -6,7 +6,7 @@ It supports **PDF and DOCX document ingestion**, **image extraction**, **RAG-bas
 
 ---
 ## Architecture 
-<img width="1024" height="600" alt="image" src="https://github.com/user-attachments/assets/0b3b2855-4147-4e6c-96ad-7b8d62d93a28" />
+<img width="600" height="600" alt="image" src="https://github.com/user-attachments/assets/0b3b2855-4147-4e6c-96ad-7b8d62d93a28" />
 
 ## 🚀 Features
 
