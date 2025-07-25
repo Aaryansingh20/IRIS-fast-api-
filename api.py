@@ -9,6 +9,14 @@ from typing import List, Optional
 import json
 import random
 from datetime import datetime
+import pytesseract
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+from PIL import Image
+import base64
+import fitz  # PyMuPDF for PDF image extraction
+from transformers import BlipProcessor, BlipForConditionalGeneration
+import torch
+
 
 # Load environment variables from .env file
 from dotenv import load_dotenv
@@ -68,6 +76,30 @@ def extract_text_from_pdf(pdf_file):
         text += page.extract_text() + "\n"
     return text
 
+def extract_images_from_pdf(pdf_file):
+    images = []
+    try:
+        pdf_file.seek(0)
+        doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+        for page_index in range(len(doc)):
+            page = doc[page_index]
+            image_list = page.get_images(full=True)
+            for img_index, img in enumerate(image_list):
+                xref = img[0]
+                base_image = doc.extract_image(xref)
+                image_bytes = base_image["image"]
+                image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+                ext = base_image["ext"]
+                images.append({
+                    "page": page_index + 1,
+                    "index": img_index + 1,
+                    "ext": ext,
+                    "base64": image_base64
+                })
+        return images
+    except Exception as e:
+        return [{"error": str(e)}]
+
 def get_text_chunks(text, chunk_size=10000, chunk_overlap=1000):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     chunks = text_splitter.split_text(text)
@@ -81,10 +113,14 @@ def get_vector_store(text_chunks, api_key=None):
 
 def get_conversational_chain(api_key=None):
     prompt_template = """
-    Answer the question as detailed as possible from the provided context, make sure to provide all the details, if the answer is not in
-    provided context just say, "answer is not available in the context", don't provide the wrong answer\n\n
-    Context:\n {context}?\n
-    Question: \n{question}\n
+    Answer the question as detailed as possible from the provided context. If the answer is not in the provided context, say 'I don't know' and do not guess or make up information. If the user asks for images from the PDF, say 'See extracted images below.' and return the images.
+
+    Context:
+    {context}
+
+    Question:
+    {question}
+
     Answer:
     """
     model = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0.3, google_api_key=api_key)
@@ -141,6 +177,28 @@ def get_direct_gemini_response(question, api_key, model_name="gemini-2.5-pro"):
     response = model.generate_content(question)
     return response.text
 
+# Helper to extract text from images using OCR
+
+def extract_text_from_image(image_file):
+    try:
+        image = Image.open(image_file)
+        text = pytesseract.image_to_string(image)
+        return text
+    except Exception as e:
+        return f"[OCR error: {str(e)}]"
+
+# Load BLIP model and processor once at startup
+blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+
+def caption_image(image_file):
+    image = Image.open(image_file).convert("RGB")
+    inputs = blip_processor(image, return_tensors="pt")
+    with torch.no_grad():
+        out = blip_model.generate(**inputs)
+    caption = blip_processor.decode(out[0], skip_special_tokens=True)
+    return caption
+
 # FastAPI app setup
 app = FastAPI()
 app.add_middleware(
@@ -183,44 +241,67 @@ async def chat(
     files: Optional[List[UploadFile]] = File(None)
 ):
     docs = []
+    image_texts = []
+    pdf_images = []
+    image_captions = []
     if files:
         for file in files:
             filename = file.filename.lower()
             content = await file.read()
             if filename.endswith(".pdf"):
                 text = extract_text_from_pdf(io.BytesIO(content))
+                docs.append({"filename": file.filename, "text": text})
+                # Always extract images from PDF
+                extracted_images = extract_images_from_pdf(io.BytesIO(content))
+                pdf_images.extend(extracted_images)
+                # Caption each extracted image
+                for img in extracted_images:
+                    if "base64" in img:
+                        image_bytes = base64.b64decode(img["base64"])
+                        try:
+                            caption = caption_image(io.BytesIO(image_bytes))
+                        except Exception as e:
+                            caption = f"[Captioning error: {str(e)}]"
+                        image_captions.append({"caption": caption, "page": img["page"], "index": img["index"]})
             elif filename.endswith(".docx"):
                 text = extract_text_from_docx(io.BytesIO(content))
+                docs.append({"filename": file.filename, "text": text})
+            elif filename.endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")):
+                text = extract_text_from_image(io.BytesIO(content))
+                image_texts.append({"filename": file.filename, "text": text})
+                # Caption uploaded image
+                try:
+                    caption = caption_image(io.BytesIO(content))
+                except Exception as e:
+                    caption = f"[Captioning error: {str(e)}]"
+                image_captions.append({"caption": caption, "filename": file.filename})
             else:
                 continue
-            docs.append({"filename": file.filename, "text": text})
     else:
         docs = DOCUMENTS  # fallback to in-memory if no files sent
 
-    use_pdf = len(docs) > 0
-    print("DOCS:", docs)
-    print("use_pdf:", use_pdf)
+    use_pdf = len(docs) > 0 or len(image_texts) > 0
     if use_pdf:
         raw_text = "".join([doc["text"] for doc in docs])
-        print("raw_text length:", len(raw_text))
-        if not raw_text.strip():
-            return JSONResponse(content={"response": "No text could be extracted from the uploaded files."})
+        image_text = "\n".join([img["text"] for img in image_texts])
+        combined_context = raw_text + "\n" + image_text
+        print("Combined context sent to Gemini:", combined_context[:1000])  # Log first 1000 chars for debug
+        if not combined_context.strip() and not pdf_images:
+            return JSONResponse(content={"response": "No text or images could be extracted from the uploaded files or images."})
         embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GEMINI_API_KEY)
         question_embedding = embeddings.embed_query(message)
-        doc_ids = [doc["filename"][:5] for doc in docs]
+        doc_ids = [doc["filename"][:5] for doc in docs] + [img["filename"][:5] for img in image_texts]
         state_key = RL_AGENT.get_state_key(question_embedding, doc_ids)
         chunking_actions = ["chunk_small", "chunk_medium", "chunk_large"]
         retrieval_actions = ["similarity_standard", "similarity_mmr"]
         available_actions = chunking_actions + retrieval_actions
         chosen_action = RL_AGENT.choose_action(state_key, available_actions)
-        print("chosen_action:", chosen_action)
         if chosen_action == "chunk_small":
-            text_chunks = get_text_chunks(raw_text, chunk_size=5000, chunk_overlap=500)
+            text_chunks = get_text_chunks(combined_context, chunk_size=5000, chunk_overlap=500)
         elif chosen_action == "chunk_medium":
-            text_chunks = get_text_chunks(raw_text, chunk_size=10000, chunk_overlap=1000)
+            text_chunks = get_text_chunks(combined_context, chunk_size=10000, chunk_overlap=1000)
         else:
-            text_chunks = get_text_chunks(raw_text, chunk_size=15000, chunk_overlap=1500)
-        print("Number of text_chunks:", len(text_chunks))
+            text_chunks = get_text_chunks(combined_context, chunk_size=15000, chunk_overlap=1500)
         vector_store, embeddings = get_vector_store(text_chunks, api_key=GEMINI_API_KEY)
         new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
         if chosen_action in retrieval_actions:
@@ -230,30 +311,23 @@ async def chat(
                 docs_retrieved = new_db.max_marginal_relevance_search(message, k=4, fetch_k=10)
         else:
             docs_retrieved = new_db.similarity_search(message)
-        print("Number of retrieved docs:", len(docs_retrieved))
-        if docs_retrieved:
-            print("Sample doc content:", docs_retrieved[0].page_content[:200])
         chain = get_conversational_chain(api_key=GEMINI_API_KEY)
-        response = chain({"input_documents": docs_retrieved, "question": message}, return_only_outputs=True)
+        # Use invoke instead of __call__
+        response = chain.invoke({"input_documents": docs_retrieved, "question": message})
         response_output = response['output_text']
-        print("Gemini response:", response_output)
-        # Fallback to direct Gemini if RAG answer is empty or says not found
         if not response_output or "answer is not available in the context" in response_output.lower():
-            print("Falling back to direct Gemini answer...")
             response_output = get_direct_gemini_response(message, GEMINI_API_KEY)
         doc_similarity_score = 1.0 if response_output else 0.0
         response_length_score = min(len(response_output) / 1000, 1.0)
         reward = (doc_similarity_score * 0.7) + (response_length_score * 0.3)
         RL_AGENT.update_q_value(state_key, chosen_action, reward)
         RL_AGENT.save_model()
-        return JSONResponse(content={"response": response_output})
+        return JSONResponse(content={"response": response_output, "images": pdf_images, "captions": image_captions})
     else:
         try:
             response_output = get_direct_gemini_response(message, GEMINI_API_KEY)
-            print("Gemini direct response:", response_output)
             return JSONResponse(content={"response": response_output})
         except Exception as e:
-            print("Gemini error:", e)
             return JSONResponse(content={"response": f"Error from Gemini: {str(e)}"})
 
 @app.post("/chat-stream")
@@ -262,41 +336,49 @@ async def chat_stream(
     files: Optional[List[UploadFile]] = File(None)
 ):
     docs = []
+    image_texts = []
     if files:
         for file in files:
             filename = file.filename.lower()
             content = await file.read()
             if filename.endswith(".pdf"):
                 text = extract_text_from_pdf(io.BytesIO(content))
+                docs.append({"filename": file.filename, "text": text})
             elif filename.endswith(".docx"):
                 text = extract_text_from_docx(io.BytesIO(content))
+                docs.append({"filename": file.filename, "text": text})
+            elif filename.endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")):
+                text = extract_text_from_image(io.BytesIO(content))
+                image_texts.append({"filename": file.filename, "text": text})
             else:
                 continue
-            docs.append({"filename": file.filename, "text": text})
     else:
         docs = DOCUMENTS  # fallback to in-memory if no files sent
 
-    use_pdf = len(docs) > 0
+    use_pdf = len(docs) > 0 or len(image_texts) > 0
     if use_pdf:
         raw_text = "".join([doc["text"] for doc in docs])
-        if not raw_text.strip():
+        image_text = "\n".join([img["text"] for img in image_texts])
+        combined_context = raw_text + "\n" + image_text
+        print("Combined context sent to Gemini:", combined_context[:1000])  # Log first 1000 chars for debug
+        if not combined_context.strip():
             def error_gen():
-                yield "No text could be extracted from the uploaded files."
+                yield "No text could be extracted from the uploaded files or images."
             return StreamingResponse(error_gen(), media_type="text/plain")
         embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GEMINI_API_KEY)
         question_embedding = embeddings.embed_query(message)
-        doc_ids = [doc["filename"][:5] for doc in docs]
+        doc_ids = [doc["filename"][:5] for doc in docs] + [img["filename"][:5] for img in image_texts]
         state_key = RL_AGENT.get_state_key(question_embedding, doc_ids)
         chunking_actions = ["chunk_small", "chunk_medium", "chunk_large"]
         retrieval_actions = ["similarity_standard", "similarity_mmr"]
         available_actions = chunking_actions + retrieval_actions
         chosen_action = RL_AGENT.choose_action(state_key, available_actions)
         if chosen_action == "chunk_small":
-            text_chunks = get_text_chunks(raw_text, chunk_size=5000, chunk_overlap=500)
+            text_chunks = get_text_chunks(combined_context, chunk_size=5000, chunk_overlap=500)
         elif chosen_action == "chunk_medium":
-            text_chunks = get_text_chunks(raw_text, chunk_size=10000, chunk_overlap=1000)
+            text_chunks = get_text_chunks(combined_context, chunk_size=10000, chunk_overlap=1000)
         else:
-            text_chunks = get_text_chunks(raw_text, chunk_size=15000, chunk_overlap=1500)
+            text_chunks = get_text_chunks(combined_context, chunk_size=15000, chunk_overlap=1500)
         vector_store, embeddings = get_vector_store(text_chunks, api_key=GEMINI_API_KEY)
         new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
         if chosen_action in retrieval_actions:
@@ -309,7 +391,6 @@ async def chat_stream(
         chain = get_conversational_chain(api_key=GEMINI_API_KEY)
         response = chain({"input_documents": docs_retrieved, "question": message}, return_only_outputs=True)
         response_output = response['output_text']
-        # Fallback to direct Gemini if RAG answer is empty or says not found
         if not response_output or "answer is not available in the context" in response_output.lower():
             response_output = get_direct_gemini_response(message, GEMINI_API_KEY)
         doc_similarity_score = 1.0 if response_output else 0.0
@@ -318,7 +399,6 @@ async def chat_stream(
         RL_AGENT.update_q_value(state_key, chosen_action, reward)
         RL_AGENT.save_model()
         def stream_gen():
-            # Simulate streaming by yielding chunks of the response
             for i in range(0, len(response_output), 20):
                 yield response_output[i:i+20]
         return StreamingResponse(stream_gen(), media_type="text/plain")
