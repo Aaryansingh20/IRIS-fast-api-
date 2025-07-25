@@ -34,11 +34,10 @@ It supports **PDF and DOCX document ingestion**, **image extraction**, **RAG-bas
 
 ## 📸 Screenshots
 
-| Upload Docs | Chat View | RL Analysis |
-|-------------|-----------|-------------|
-| ![upload](./assets/upload_docs.png) | ![chat](./assets/chat_view.png) | ![rl](./assets/rl_table.png) |
+<img width="1919" height="972" alt="image" src="https://github.com/user-attachments/assets/452d6989-a115-486e-b15d-81866744de7f" />
+<img width="1901" height="969" alt="image" src="https://github.com/user-attachments/assets/36916145-ee7a-45b1-8f30-c88cbcb63b34" />
 
----
+
 
 ## ⚙️ Tech Stack
 
@@ -62,15 +61,57 @@ Each user interaction updates the Q-table based on feedback from Gemini, creatin
 
 ---
 
+Here’s a polished and beautifully formatted **`README.md`** section for your 🔧 **Setup & Installation**, designed for easy copy-pasting and visual appeal:
+
+---
+
 ## 🔧 Setup & Installation
 
-### 1. Clone the Repo
-#git clone https://github.com/yourusername/gemini-rag-rl-chatbot.git
-#cd rag-chat
-#python -m venv myenv
-#myenv/scripts/activate
-#pip install -r requirements.txt
-# create and .env file 
-GEMINI_API_KEY=" add you API "
-#pip install google-generativeai
-#streamlit run app.py
+Follow these steps to get the project up and running locally:
+
+### 1. 🚀 Clone the Repository
+
+```bash
+git clone https://github.com/yourusername/gemini-rag-rl-chatbot.git
+cd gemini-rag-rl-chatbot
+```
+
+### 2. 🧪 Set Up a Virtual Environment (Windows)
+
+```bash
+python -m venv myenv
+myenv\Scripts\activate
+```
+
+### 3. 📦 Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 4. 🔐 Configure Environment Variables
+
+Create a `.env` file in the root directory and add your [Gemini API Key](https://makersuite.google.com/app/apikey):
+
+```env
+GEMINI_API_KEY="your_gemini_api_key_here"
+```
+
+### 5. 📥 Install Gemini SDK
+
+```bash
+pip install google-generativeai
+```
+
+### 6. 🧠 Run the App
+
+```bash
+streamlit run app.py
+```
+
+---
+
+✨ Now open the app in your browser and explore the power of RAG + RL + Gemini!
+
+Let me know if you'd like me to write the full README including **Features**, **Tech Stack**, **Architecture Diagram**, **Screenshots**, or **License**.
+
