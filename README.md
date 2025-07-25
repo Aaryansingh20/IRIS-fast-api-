@@ -5,6 +5,8 @@ This project is a **powerful AI-driven chatbot** application built with **Google
 It supports **PDF and DOCX document ingestion**, **image extraction**, **RAG-based question answering**, **multimodal (image + text) chat**, and **dynamic tuning** of retrieval strategy using **Q-Learning**.
 
 ---
+## Architecture 
+<img width="1024" height="1536" alt="image" src="https://github.com/user-attachments/assets/0b3b2855-4147-4e6c-96ad-7b8d62d93a28" />
 
 ## 🚀 Features
 
@@ -67,8 +69,8 @@ Follow these steps to get the project up and running locally:
 ### 1. 🚀 Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/gemini-rag-rl-chatbot.git
-cd gemini-rag-rl-chatbot
+git clone https://github.com/Aaryansingh20/Rag-chat.git
+cd rag-chat
 ```
 
 ### 2. 🧪 Set Up a Virtual Environment (Windows)
