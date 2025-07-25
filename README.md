@@ -59,11 +59,6 @@ The system explores and learns the best combination of:
 
 Each user interaction updates the Q-table based on feedback from Gemini, creating a **self-optimizing chatbot** over time.
 
----
-
-Here’s a polished and beautifully formatted **`README.md`** section for your 🔧 **Setup & Installation**, designed for easy copy-pasting and visual appeal:
-
----
 
 ## 🔧 Setup & Installation
 
@@ -111,7 +106,5 @@ streamlit run app.py
 
 ---
 
-✨ Now open the app in your browser and explore the power of RAG + RL + Gemini!
 
-Let me know if you'd like me to write the full README including **Features**, **Tech Stack**, **Architecture Diagram**, **Screenshots**, or **License**.
 
