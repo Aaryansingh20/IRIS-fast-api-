@@ -32,7 +32,6 @@ It supports **PDF and DOCX document ingestion**, **image extraction**, **RAG-bas
 - Customize Gemini parameters (model, temperature, tokens, etc.)
 - Switch between `similarity_search` and `mmr_search`
 
----
 
 ## 📸 Screenshots
 
