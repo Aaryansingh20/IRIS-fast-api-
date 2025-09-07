@@ -10,6 +10,10 @@ import io
 from PIL import Image
 from datetime import datetime
 import docx
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
 
 # Update imports for LangChain
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -526,7 +530,7 @@ def main():
         st.session_state.pdf_images = []
 
     # API Key Management
-    DEFAULT_API_KEY = "AIzaSyCdjQ7pqIms0mGJ8uoINVOn3Y6LIXh0TgU"  # Gemini API key
+    DEFAULT_API_KEY = os.getenv('GEMINI_API_KEY') # Gemini API key
     
     if 'api_key' not in st.session_state:
         st.session_state.api_key = DEFAULT_API_KEY
