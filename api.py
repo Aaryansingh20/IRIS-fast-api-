@@ -18,6 +18,10 @@ from transformers import BlipProcessor, BlipForConditionalGeneration
 import torch
 
 # Load environment variables from .env file
+app = FastAPI()
+@app.get("/")
+async def root():
+    return {"message": "IRIS API is running"}
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -34,10 +38,6 @@ from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
 import google.generativeai as genai
 
-app = FastAPI()
-@app.get("/")
-async def root():
-    return {"message": "IRIS API is running"}
 
 # RLAgent class (copied from app.py, without Streamlit dependencies)
 class RLAgent:
