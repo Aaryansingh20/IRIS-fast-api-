@@ -237,20 +237,36 @@ def extract_text_from_image(image_file):
     except Exception as e:
         return f"[OCR error: {str(e)}]"
 
-# Load BLIP model and processor once at startup
-blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+# Load models lazily to avoid startup timeout
+blip_processor = None
+blip_model = None
+
+def load_blip_models():
+    global blip_processor, blip_model
+    if blip_processor is None:
+        blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+        blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+    return blip_processor, blip_model
+
 
 def caption_image(image_file):
-    image = Image.open(image_file).convert("RGB")
-    inputs = blip_processor(image, return_tensors="pt")
-    with torch.no_grad():
-        out = blip_model.generate(**inputs)
-    caption = blip_processor.decode(out[0], skip_special_tokens=True)
-    return caption
+    try:
+        processor, model = load_blip_models()  # Load only when needed
+        image = Image.open(image_file).convert("RGB")
+        inputs = processor(image, return_tensors="pt")
+        with torch.no_grad():
+            out = model.generate(**inputs)
+        caption = processor.decode(out[0], skip_special_tokens=True)
+        return caption
+    except Exception as e:
+        return f"[Captioning error: {str(e)}]"
+
 
 # FastAPI app setup
 app = FastAPI()
+@app.get("/")
+async def root():
+    return {"message": "IRIS API is running"}
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
