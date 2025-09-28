@@ -10,10 +10,12 @@ import io
 from PIL import Image
 from datetime import datetime
 import docx
-import os
 from dotenv import load_dotenv
 load_dotenv()
 
+# New imports for embedding fallback
+from sentence_transformers import SentenceTransformer
+from langchain_huggingface import HuggingFaceEmbeddings
 
 # Update imports for LangChain
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -133,11 +135,59 @@ def get_text_chunks(text, chunk_size=10000, chunk_overlap=1000):
     chunks = text_splitter.split_text(text)
     return chunks
 
+# ENHANCED - FALLBACK VECTOR STORE FUNCTION
 def get_vector_store(text_chunks, model_name, api_key=None):
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
+    """Enhanced vector store creation with embedding fallback"""
+    embeddings = None
+    
+    # Try Gemini embeddings first
+    if api_key:
+        try:
+            embeddings = GoogleGenerativeAIEmbeddings(
+                model="models/embedding-001", 
+                google_api_key=api_key
+            )
+            # Test with a small query to check quota
+            test_embedding = embeddings.embed_query("test")
+            st.sidebar.success("✅ Using Gemini embeddings")
+        except Exception as e:
+            if "429" in str(e) or "quota" in str(e).lower():
+                st.sidebar.warning("⚠️ Gemini quota exceeded, switching to free embeddings...")
+                embeddings = None
+            else:
+                st.sidebar.warning(f"⚠️ Gemini error: {str(e)}")
+                embeddings = None
+    
+    # Fallback to free Hugging Face embeddings
+    if embeddings is None:
+        try:
+            embeddings = HuggingFaceEmbeddings(
+                model_name="all-MiniLM-L6-v2",
+                model_kwargs={'device': 'cpu'},
+                encode_kwargs={'normalize_embeddings': True}
+            )
+            st.sidebar.success("✅ Using free Hugging Face embeddings (all-MiniLM-L6-v2)")
+        except Exception as e:
+            st.sidebar.error(f"❌ Failed to load embeddings: {str(e)}")
+            raise e
+    
+    # Create vector store
     vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
     vector_store.save_local("faiss_index")
+    
     return vector_store, embeddings
+
+def safe_embed_query(embeddings, query):
+    """Safely embed query with error handling"""
+    try:
+        return embeddings.embed_query(query)
+    except Exception as e:
+        if "429" in str(e) or "quota" in str(e).lower():
+            st.sidebar.warning("⚠️ Quota exceeded, using fallback embedding")
+            # Create simple fallback embedding
+            return [0.0] * 384  # Standard embedding dimension
+        else:
+            raise e
 
 def get_document_similarity(question, docs):
     """Calculate similarity score between question and retrieved documents"""
@@ -338,136 +388,192 @@ def user_input(user_question, model_name, api_key, uploaded_files, conversation_
             st.warning("Please upload PDF files for document-related questions.")
             return
         
-        # Process the text from PDFs
-        raw_text = ""
-        for file in uploaded_files:
-            if file.name.lower().endswith(".pdf"):
-                raw_text += get_pdf_text([file])
-            elif file.name.lower().endswith(".docx"):
-                raw_text += extract_text_from_docx(file)
-        
-        # Check if any text was extracted
-        if not raw_text.strip():
-            st.warning("No text could be extracted from the uploaded files. Please check your files and try again.")
+        try:
+            # Process the text from PDFs
+            raw_text = ""
+            for file in uploaded_files:
+                if file.name.lower().endswith(".pdf"):
+                    raw_text += get_pdf_text([file])
+                elif file.name.lower().endswith(".docx"):
+                    raw_text += extract_text_from_docx(file)
+            
+            # Check if any text was extracted
+            if not raw_text.strip():
+                st.warning("No text could be extracted from the uploaded files. Please check your files and try again.")
+                return rl_agent
+            
+            # Use RL agent to decide on chunking strategy
+            # First, create initial chunks to get embeddings
+            text_chunks = get_text_chunks(raw_text, chunk_size=10000, chunk_overlap=1000)
+            vector_store, embeddings = get_vector_store(text_chunks, model_name, api_key)
+            
+            # Safely embed the question
+            question_embedding = safe_embed_query(embeddings, user_question)
+            
+            # Create a simple state representation
+            doc_ids = [file.name[:5] for file in uploaded_files]
+            state_key = rl_agent.get_state_key(question_embedding, doc_ids)
+            
+            # Available actions for text chunking and retrieval
+            chunking_actions = ["chunk_small", "chunk_medium", "chunk_large"]
+            retrieval_actions = ["similarity_standard", "similarity_mmr"]
+            available_actions = chunking_actions + retrieval_actions
+            
+            # Choose action based on current state
+            chosen_action = rl_agent.choose_action(state_key, available_actions)
+            
+            # Apply the chosen chunking strategy
+            if chosen_action == "chunk_small":
+                text_chunks = get_text_chunks(raw_text, chunk_size=5000, chunk_overlap=500)
+                st.sidebar.info("RL Agent chose: Small chunks (5000 chars)")
+            elif chosen_action == "chunk_medium":
+                text_chunks = get_text_chunks(raw_text, chunk_size=10000, chunk_overlap=1000)
+                st.sidebar.info("RL Agent chose: Medium chunks (10000 chars)")
+            else:  # chunk_large
+                text_chunks = get_text_chunks(raw_text, chunk_size=15000, chunk_overlap=1500)
+                st.sidebar.info("RL Agent chose: Large chunks (15000 chars)")
+            
+            # Create vector store with the chosen chunks
+            vector_store, embeddings = get_vector_store(text_chunks, model_name, api_key)
+            
+            # Load the vector store
+            new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+            
+            # Apply the chosen retrieval strategy
+            if chosen_action in retrieval_actions:
+                if chosen_action == "similarity_standard":
+                    docs = new_db.similarity_search(user_question)
+                    st.sidebar.info("RL Agent chose: Standard similarity search")
+                else:  # similarity_mmr
+                    docs = new_db.max_marginal_relevance_search(user_question, k=4, fetch_k=10)
+                    st.sidebar.info("RL Agent chose: MMR similarity search (diversity-focused)")
+            else:
+                # Default to standard similarity search if a chunking action was chosen
+                docs = new_db.similarity_search(user_question)
+            
+            # Get answer from LLM
+            chain = get_conversational_chain("Google AI", vectorstore=new_db, api_key=api_key)
+            response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
+            
+            response_output = response['output_text']
+            
+            # Check if question is about images
+            show_images = False
+            image_related_terms = ["image", "picture", "photo", "figure", "diagram", "illustration", "visual"]
+            for term in image_related_terms:
+                if term in user_question.lower():
+                    show_images = True
+                    break
+            
+            # Evaluate the response quality
+            doc_similarity_score = get_document_similarity(user_question, docs)
+            response_length_score = min(len(response_output) / 1000, 1.0)
+            
+            # Combine scores
+            reward = (doc_similarity_score * 0.7) + (response_length_score * 0.3)
+            
+            # Update the RL model
+            rl_agent.update_q_value(state_key, chosen_action, reward)
+            
+            # Save the updated model
+            rl_agent.save_model()
+            
+            # Add to conversation history
+            pdf_names = [file.name for file in uploaded_files] if uploaded_files else []
+            conversation_history.append((user_question, response_output, model_name, 
+                                        datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
+                                        ", ".join(pdf_names), chosen_action, f"{reward:.2f}"))
+
+            # Display the complete conversation history in reverse order (newest first)
+            for i, (question, answer, model, timestamp, pdf_name, action, reward) in enumerate(reversed(conversation_history)):
+                # User message
+                user_html = f"""
+                    <div class="chat-message user">
+                        <div class="avatar">
+                            <img src="https://i.pinimg.com/736x/3c/ae/07/3cae079ca0b9e55ec6bfc1b358c9b1e2.jpg">
+                        </div>    
+                        <div class="message">
+                            <p>{question}</p>
+                        </div>
+                    </div>
+                """
+                st.markdown(user_html, unsafe_allow_html=True)
+                
+                # Bot message
+                mode_info = "Mode: Direct Gemini Query" if action == "direct_query" else f"RL Agent: Strategy = {action}, Reward = {reward}"
+                bot_html = f"""
+                    <div class="chat-message bot">
+                        <div class="avatar">
+                            <img src="https://i.pinimg.com/736x/b2/8d/5d/b28d5d3c10668debab348d53802e9385.jpg">
+                        </div>
+                        <div class="message">
+                            <p>{answer}</p>
+                            <span class="mode-info">{mode_info}</span>
+                        </div>
+                    </div>
+                """
+                st.markdown(bot_html, unsafe_allow_html=True)
+            
+            # Display images if requested and available
+            if show_images and pdf_images:
+                st.write("### Related Images from Documents:")
+                image_cols = st.columns(3)
+                for i, img_data in enumerate(pdf_images[:6]):  # Show up to 6 images
+                    with image_cols[i % 3]:
+                        st.image(img_data["image"], caption=f"From {img_data['filename']} (Page {img_data['page']})")
+            
             return rl_agent
         
-        # Use RL agent to decide on chunking strategy
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
-        question_embedding = embeddings.embed_query(user_question)
-        
-        # Create a simple state representation
-        doc_ids = [file.name[:5] for file in uploaded_files]
-        state_key = rl_agent.get_state_key(question_embedding, doc_ids)
-        
-        # Available actions for text chunking and retrieval
-        chunking_actions = ["chunk_small", "chunk_medium", "chunk_large"]
-        retrieval_actions = ["similarity_standard", "similarity_mmr"]
-        available_actions = chunking_actions + retrieval_actions
-        
-        # Choose action based on current state
-        chosen_action = rl_agent.choose_action(state_key, available_actions)
-        
-        # Apply the chosen chunking strategy
-        if chosen_action == "chunk_small":
-            text_chunks = get_text_chunks(raw_text, chunk_size=5000, chunk_overlap=500)
-            st.sidebar.info("RL Agent chose: Small chunks (5000 chars)")
-        elif chosen_action == "chunk_medium":
-            text_chunks = get_text_chunks(raw_text, chunk_size=10000, chunk_overlap=1000)
-            st.sidebar.info("RL Agent chose: Medium chunks (10000 chars)")
-        else:  # chunk_large
-            text_chunks = get_text_chunks(raw_text, chunk_size=15000, chunk_overlap=1500)
-            st.sidebar.info("RL Agent chose: Large chunks (15000 chars)")
-        
-        # Create vector store with the chunks
-        vector_store, embeddings = get_vector_store(text_chunks, model_name, api_key)
-        
-        # Load the vector store
-        new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-        
-        # Apply the chosen retrieval strategy
-        if chosen_action in retrieval_actions:
-            if chosen_action == "similarity_standard":
-                docs = new_db.similarity_search(user_question)
-                st.sidebar.info("RL Agent chose: Standard similarity search")
-            else:  # similarity_mmr
-                docs = new_db.max_marginal_relevance_search(user_question, k=4, fetch_k=10)
-                st.sidebar.info("RL Agent chose: MMR similarity search (diversity-focused)")
-        else:
-            # Default to standard similarity search if a chunking action was chosen
-            docs = new_db.similarity_search(user_question)
-        
-        # Get answer from LLM
-        chain = get_conversational_chain("Google AI", vectorstore=new_db, api_key=api_key)
-        response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
-        
-        response_output = response['output_text']
-        
-        # Check if question is about images
-        show_images = False
-        image_related_terms = ["image", "picture", "photo", "figure", "diagram", "illustration", "visual"]
-        for term in image_related_terms:
-            if term in user_question.lower():
-                show_images = True
-                break
-        
-        # Evaluate the response quality
-        doc_similarity_score = get_document_similarity(user_question, docs)
-        response_length_score = min(len(response_output) / 1000, 1.0)
-        
-        # Combine scores
-        reward = (doc_similarity_score * 0.7) + (response_length_score * 0.3)
-        
-        # Update the RL model
-        rl_agent.update_q_value(state_key, chosen_action, reward)
-        
-        # Save the updated model
-        rl_agent.save_model()
-        
-        # Add to conversation history
-        pdf_names = [file.name for file in uploaded_files] if uploaded_files else []
-        conversation_history.append((user_question, response_output, model_name, 
-                                    datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
-                                    ", ".join(pdf_names), chosen_action, f"{reward:.2f}"))
-
-        # Display the complete conversation history in reverse order (newest first)
-        for i, (question, answer, model, timestamp, pdf_name, action, reward) in enumerate(reversed(conversation_history)):
-            # User message
-            user_html = f"""
-                <div class="chat-message user">
-                    <div class="avatar">
-                        <img src="https://i.pinimg.com/736x/3c/ae/07/3cae079ca0b9e55ec6bfc1b358c9b1e2.jpg">
-                    </div>    
-                    <div class="message">
-                        <p>{question}</p>
-                    </div>
-                </div>
-            """
-            st.markdown(user_html, unsafe_allow_html=True)
+        except Exception as e:
+            st.error(f"Error in PDF processing: {str(e)}")
+            st.info("Falling back to direct Gemini response...")
             
-            # Bot message
-            mode_info = "Mode: Direct Gemini Query" if action == "direct_query" else f"RL Agent: Strategy = {action}, Reward = {reward}"
-            bot_html = f"""
-                <div class="chat-message bot">
-                    <div class="avatar">
-                        <img src="https://i.pinimg.com/736x/b2/8d/5d/b28d5d3c10668debab348d53802e9385.jpg">
-                    </div>
-                    <div class="message">
-                        <p>{answer}</p>
-                        <span class="mode-info">{mode_info}</span>
-                    </div>
-                </div>
-            """
-            st.markdown(bot_html, unsafe_allow_html=True)
-        
-        # Display images if requested and available
-        if show_images and pdf_images:
-            st.write("### Related Images from Documents:")
-            image_cols = st.columns(3)
-            for i, img_data in enumerate(pdf_images[:6]):  # Show up to 6 images
-                with image_cols[i % 3]:
-                    st.image(img_data["image"], caption=f"From {img_data['filename']} (Page {img_data['page']})")
-        
-        return rl_agent
+            # Fallback to direct response if everything fails
+            try:
+                response_output = get_direct_gemini_response(user_question, api_key)
+                pdf_names = [file.name for file in uploaded_files] if uploaded_files else []
+                conversation_history.append((
+                    user_question, 
+                    response_output, 
+                    "Direct " + model_name + " (Fallback)", 
+                    datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
+                    ", ".join(pdf_names), 
+                    "fallback_query", 
+                    "N/A"
+                ))
+                
+                # Display conversation
+                for i, (question, answer, model, timestamp, pdf_name, action, reward) in enumerate(reversed(conversation_history)):
+                    user_html = f"""
+                        <div class="chat-message user">
+                            <div class="avatar">
+                                <img src="https://i.pinimg.com/736x/3c/ae/07/3cae079ca0b9e55ec6bfc1b358c9b1e2.jpg">
+                            </div>    
+                            <div class="message">
+                                <p>{question}</p>
+                            </div>
+                        </div>
+                    """
+                    st.markdown(user_html, unsafe_allow_html=True)
+                    
+                    mode_info = "Mode: Fallback Gemini Query" if "fallback" in action else f"RL Agent: Strategy = {action}, Reward = {reward}"
+                    bot_html = f"""
+                        <div class="chat-message bot">
+                            <div class="avatar">
+                                <img src="https://i.pinimg.com/736x/b2/8d/5d/b28d5d3c10668debab348d53802e9385.jpg">
+                            </div>
+                            <div class="message">
+                                <p>{answer}</p>
+                                <span class="mode-info">{mode_info}</span>
+                            </div>
+                        </div>
+                    """
+                    st.markdown(bot_html, unsafe_allow_html=True)
+                
+                return rl_agent
+            except Exception as fallback_error:
+                st.error(f"Complete failure: {str(fallback_error)}")
+                return rl_agent
 
 def show_rl_performance(rl_agent):
     """Display RL performance metrics and visualizations"""
@@ -603,7 +709,7 @@ def main():
                 st.session_state.user_question = None
                 st.session_state.rl_agent = RLAgent()
                 st.session_state.pdf_images = []
-                st.experimental_rerun()
+                st.rerun()
                 
             elif clear_button:
                 if 'user_question' in st.session_state:
@@ -733,7 +839,6 @@ def main():
             st.success("Settings saved successfully!")
 
 # Add new functions for enhanced Gemini chat and image generation
-
 def get_image_from_gemini(prompt, api_key, model="gemini-1.5-flash", size="512x512", style="natural"):
     """Generate image description using Gemini multimodal capabilities"""
     genai.configure(api_key=api_key)
