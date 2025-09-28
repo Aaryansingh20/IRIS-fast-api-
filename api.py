@@ -10,17 +10,20 @@ import json
 import random
 from datetime import datetime
 import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 from PIL import Image
 import base64
 import fitz  # PyMuPDF for PDF image extraction
 from transformers import BlipProcessor, BlipForConditionalGeneration
 import torch
 
-
 # Load environment variables from .env file
 from dotenv import load_dotenv
 load_dotenv()
+
+# NEW IMPORTS FOR EMBEDDING FALLBACK
+from sentence_transformers import SentenceTransformer
+from langchain_huggingface import HuggingFaceEmbeddings
 
 # LangChain and Gemini imports
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -105,11 +108,59 @@ def get_text_chunks(text, chunk_size=10000, chunk_overlap=1000):
     chunks = text_splitter.split_text(text)
     return chunks
 
+# ENHANCED - FALLBACK VECTOR STORE FUNCTION
 def get_vector_store(text_chunks, api_key=None):
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
+    """Enhanced vector store creation with embedding fallback"""
+    embeddings = None
+    
+    # Try Gemini embeddings first
+    if api_key:
+        try:
+            embeddings = GoogleGenerativeAIEmbeddings(
+                model="models/embedding-001", 
+                google_api_key=api_key
+            )
+            # Test with a small query to check quota
+            test_embedding = embeddings.embed_query("test")
+            print("✅ Using Gemini embeddings")
+        except Exception as e:
+            if "429" in str(e) or "quota" in str(e).lower():
+                print("⚠️ Gemini quota exceeded, switching to free embeddings...")
+                embeddings = None
+            else:
+                print(f"⚠️ Gemini error: {str(e)}")
+                embeddings = None
+    
+    # Fallback to free Hugging Face embeddings
+    if embeddings is None:
+        try:
+            embeddings = HuggingFaceEmbeddings(
+                model_name="all-MiniLM-L6-v2",
+                model_kwargs={'device': 'cpu'},
+                encode_kwargs={'normalize_embeddings': True}
+            )
+            print("✅ Using free Hugging Face embeddings (all-MiniLM-L6-v2)")
+        except Exception as e:
+            print(f"❌ Failed to load embeddings: {str(e)}")
+            raise e
+    
+    # Create vector store
     vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
     vector_store.save_local("faiss_index")
+    
     return vector_store, embeddings
+
+def safe_embed_query(embeddings, query):
+    """Safely embed query with error handling"""
+    try:
+        return embeddings.embed_query(query)
+    except Exception as e:
+        if "429" in str(e) or "quota" in str(e).lower():
+            print("⚠️ Quota exceeded, using fallback embedding")
+            # Create simple fallback embedding
+            return [0.0] * 384  # Standard embedding dimension
+        else:
+            raise e
 
 def get_conversational_chain(api_key=None):
     prompt_template = """
@@ -178,7 +229,6 @@ def get_direct_gemini_response(question, api_key, model_name="gemini-2.5-pro"):
     return response.text
 
 # Helper to extract text from images using OCR
-
 def extract_text_from_image(image_file):
     try:
         image = Image.open(image_file)
@@ -244,6 +294,10 @@ async def chat(
     image_texts = []
     pdf_images = []
     image_captions = []
+    
+    # Add this check at the very beginning
+    if files is None:
+        files = []
     if files:
         for file in files:
             filename = file.filename.lower()
@@ -282,47 +336,82 @@ async def chat(
 
     use_pdf = len(docs) > 0 or len(image_texts) > 0
     if use_pdf:
-        raw_text = "".join([doc["text"] for doc in docs])
-        image_text = "\n".join([img["text"] for img in image_texts])
-        combined_context = raw_text + "\n" + image_text
-        print("Combined context sent to Gemini:", combined_context[:1000])  # Log first 1000 chars for debug
-        if not combined_context.strip() and not pdf_images:
-            return JSONResponse(content={"response": "No text or images could be extracted from the uploaded files or images."})
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GEMINI_API_KEY)
-        question_embedding = embeddings.embed_query(message)
-        doc_ids = [doc["filename"][:5] for doc in docs] + [img["filename"][:5] for img in image_texts]
-        state_key = RL_AGENT.get_state_key(question_embedding, doc_ids)
-        chunking_actions = ["chunk_small", "chunk_medium", "chunk_large"]
-        retrieval_actions = ["similarity_standard", "similarity_mmr"]
-        available_actions = chunking_actions + retrieval_actions
-        chosen_action = RL_AGENT.choose_action(state_key, available_actions)
-        if chosen_action == "chunk_small":
-            text_chunks = get_text_chunks(combined_context, chunk_size=5000, chunk_overlap=500)
-        elif chosen_action == "chunk_medium":
+        try:
+            raw_text = "".join([doc["text"] for doc in docs])
+            image_text = "\n".join([img["text"] for img in image_texts])
+            combined_context = raw_text + "\n" + image_text
+            print("Combined context sent to Gemini:", combined_context[:1000])  # Log first 1000 chars for debug
+            if not combined_context.strip() and not pdf_images:
+                return JSONResponse(content={"response": "No text or images could be extracted from the uploaded files or images."})
+            
+            # Use enhanced vector store with fallback
             text_chunks = get_text_chunks(combined_context, chunk_size=10000, chunk_overlap=1000)
-        else:
-            text_chunks = get_text_chunks(combined_context, chunk_size=15000, chunk_overlap=1500)
-        vector_store, embeddings = get_vector_store(text_chunks, api_key=GEMINI_API_KEY)
-        new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-        if chosen_action in retrieval_actions:
-            if chosen_action == "similarity_standard":
-                docs_retrieved = new_db.similarity_search(message)
+            vector_store, embeddings = get_vector_store(text_chunks, api_key=GEMINI_API_KEY)
+            
+            # Safely embed the question
+            question_embedding = safe_embed_query(embeddings, message)
+            
+            doc_ids = [doc["filename"][:5] for doc in docs] + [img["filename"][:5] for img in image_texts]
+            state_key = RL_AGENT.get_state_key(question_embedding, doc_ids)
+            chunking_actions = ["chunk_small", "chunk_medium", "chunk_large"]
+            retrieval_actions = ["similarity_standard", "similarity_mmr"]
+            available_actions = chunking_actions + retrieval_actions
+            chosen_action = RL_AGENT.choose_action(state_key, available_actions)
+            
+            if chosen_action == "chunk_small":
+                text_chunks = get_text_chunks(combined_context, chunk_size=5000, chunk_overlap=500)
+            elif chosen_action == "chunk_medium":
+                text_chunks = get_text_chunks(combined_context, chunk_size=10000, chunk_overlap=1000)
             else:
-                docs_retrieved = new_db.max_marginal_relevance_search(message, k=4, fetch_k=10)
-        else:
-            docs_retrieved = new_db.similarity_search(message)
-        chain = get_conversational_chain(api_key=GEMINI_API_KEY)
-        # Use invoke instead of __call__
-        response = chain.invoke({"input_documents": docs_retrieved, "question": message})
-        response_output = response['output_text']
-        if not response_output or "answer is not available in the context" in response_output.lower():
-            response_output = get_direct_gemini_response(message, GEMINI_API_KEY)
-        doc_similarity_score = 1.0 if response_output else 0.0
-        response_length_score = min(len(response_output) / 1000, 1.0)
-        reward = (doc_similarity_score * 0.7) + (response_length_score * 0.3)
-        RL_AGENT.update_q_value(state_key, chosen_action, reward)
-        RL_AGENT.save_model()
-        return JSONResponse(content={"response": response_output, "images": pdf_images, "captions": image_captions})
+                text_chunks = get_text_chunks(combined_context, chunk_size=15000, chunk_overlap=1500)
+            
+            vector_store, embeddings = get_vector_store(text_chunks, api_key=GEMINI_API_KEY)
+            new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+            
+            if chosen_action in retrieval_actions:
+                if chosen_action == "similarity_standard":
+                    docs_retrieved = new_db.similarity_search(message)
+                else:
+                    docs_retrieved = new_db.max_marginal_relevance_search(message, k=4, fetch_k=10)
+            else:
+                docs_retrieved = new_db.similarity_search(message)
+            
+            chain = get_conversational_chain(api_key=GEMINI_API_KEY)
+            # Use invoke instead of __call__
+            response = chain.invoke({"input_documents": docs_retrieved, "question": message})
+            response_output = response['output_text']
+            
+            if not response_output or "answer is not available in the context" in response_output.lower():
+                response_output = get_direct_gemini_response(message, GEMINI_API_KEY)
+            
+            doc_similarity_score = 1.0 if response_output else 0.0
+            response_length_score = min(len(response_output) / 1000, 1.0)
+            reward = (doc_similarity_score * 0.7) + (response_length_score * 0.3)
+            RL_AGENT.update_q_value(state_key, chosen_action, reward)
+            RL_AGENT.save_model()
+            
+            return JSONResponse(content={
+                "response": response_output, 
+                "images": pdf_images, 
+                "captions": image_captions,
+                "rl_action": chosen_action,
+                "reward": f"{reward:.2f}"
+            })
+            
+        except Exception as e:
+            print(f"Error in PDF processing: {str(e)}")
+            # Fallback to direct Gemini response
+            try:
+                response_output = get_direct_gemini_response(message, GEMINI_API_KEY)
+                return JSONResponse(content={
+                    "response": response_output,
+                    "mode": "fallback_direct"
+                })
+            except Exception as fallback_error:
+                return JSONResponse(content={
+                    "response": f"Error: {str(fallback_error)}"
+                }, status_code=500)
+    
     else:
         try:
             response_output = get_direct_gemini_response(message, GEMINI_API_KEY)
@@ -337,6 +426,10 @@ async def chat_stream(
 ):
     docs = []
     image_texts = []
+    
+    # Add this check at the very beginning
+    if files is None:
+        files = []
     if files:
         for file in files:
             filename = file.filename.lower()
@@ -357,51 +450,71 @@ async def chat_stream(
 
     use_pdf = len(docs) > 0 or len(image_texts) > 0
     if use_pdf:
-        raw_text = "".join([doc["text"] for doc in docs])
-        image_text = "\n".join([img["text"] for img in image_texts])
-        combined_context = raw_text + "\n" + image_text
-        print("Combined context sent to Gemini:", combined_context[:1000])  # Log first 1000 chars for debug
-        if not combined_context.strip():
-            def error_gen():
-                yield "No text could be extracted from the uploaded files or images."
-            return StreamingResponse(error_gen(), media_type="text/plain")
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GEMINI_API_KEY)
-        question_embedding = embeddings.embed_query(message)
-        doc_ids = [doc["filename"][:5] for doc in docs] + [img["filename"][:5] for img in image_texts]
-        state_key = RL_AGENT.get_state_key(question_embedding, doc_ids)
-        chunking_actions = ["chunk_small", "chunk_medium", "chunk_large"]
-        retrieval_actions = ["similarity_standard", "similarity_mmr"]
-        available_actions = chunking_actions + retrieval_actions
-        chosen_action = RL_AGENT.choose_action(state_key, available_actions)
-        if chosen_action == "chunk_small":
-            text_chunks = get_text_chunks(combined_context, chunk_size=5000, chunk_overlap=500)
-        elif chosen_action == "chunk_medium":
+        try:
+            raw_text = "".join([doc["text"] for doc in docs])
+            image_text = "\n".join([img["text"] for img in image_texts])
+            combined_context = raw_text + "\n" + image_text
+            print("Combined context sent to Gemini:", combined_context[:1000])  # Log first 1000 chars for debug
+            if not combined_context.strip():
+                def error_gen():
+                    yield "No text could be extracted from the uploaded files or images."
+                return StreamingResponse(error_gen(), media_type="text/plain")
+            
+            # Use enhanced vector store with fallback
             text_chunks = get_text_chunks(combined_context, chunk_size=10000, chunk_overlap=1000)
-        else:
-            text_chunks = get_text_chunks(combined_context, chunk_size=15000, chunk_overlap=1500)
-        vector_store, embeddings = get_vector_store(text_chunks, api_key=GEMINI_API_KEY)
-        new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-        if chosen_action in retrieval_actions:
-            if chosen_action == "similarity_standard":
-                docs_retrieved = new_db.similarity_search(message)
+            vector_store, embeddings = get_vector_store(text_chunks, api_key=GEMINI_API_KEY)
+            
+            # Safely embed the question
+            question_embedding = safe_embed_query(embeddings, message)
+            
+            doc_ids = [doc["filename"][:5] for doc in docs] + [img["filename"][:5] for img in image_texts]
+            state_key = RL_AGENT.get_state_key(question_embedding, doc_ids)
+            chunking_actions = ["chunk_small", "chunk_medium", "chunk_large"]
+            retrieval_actions = ["similarity_standard", "similarity_mmr"]
+            available_actions = chunking_actions + retrieval_actions
+            chosen_action = RL_AGENT.choose_action(state_key, available_actions)
+            
+            if chosen_action == "chunk_small":
+                text_chunks = get_text_chunks(combined_context, chunk_size=5000, chunk_overlap=500)
+            elif chosen_action == "chunk_medium":
+                text_chunks = get_text_chunks(combined_context, chunk_size=10000, chunk_overlap=1000)
             else:
-                docs_retrieved = new_db.max_marginal_relevance_search(message, k=4, fetch_k=10)
-        else:
-            docs_retrieved = new_db.similarity_search(message)
-        chain = get_conversational_chain(api_key=GEMINI_API_KEY)
-        response = chain({"input_documents": docs_retrieved, "question": message}, return_only_outputs=True)
-        response_output = response['output_text']
-        if not response_output or "answer is not available in the context" in response_output.lower():
-            response_output = get_direct_gemini_response(message, GEMINI_API_KEY)
-        doc_similarity_score = 1.0 if response_output else 0.0
-        response_length_score = min(len(response_output) / 1000, 1.0)
-        reward = (doc_similarity_score * 0.7) + (response_length_score * 0.3)
-        RL_AGENT.update_q_value(state_key, chosen_action, reward)
-        RL_AGENT.save_model()
-        def stream_gen():
-            for i in range(0, len(response_output), 20):
-                yield response_output[i:i+20]
-        return StreamingResponse(stream_gen(), media_type="text/plain")
+                text_chunks = get_text_chunks(combined_context, chunk_size=15000, chunk_overlap=1500)
+            
+            vector_store, embeddings = get_vector_store(text_chunks, api_key=GEMINI_API_KEY)
+            new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+            
+            if chosen_action in retrieval_actions:
+                if chosen_action == "similarity_standard":
+                    docs_retrieved = new_db.similarity_search(message)
+                else:
+                    docs_retrieved = new_db.max_marginal_relevance_search(message, k=4, fetch_k=10)
+            else:
+                docs_retrieved = new_db.similarity_search(message)
+            
+            chain = get_conversational_chain(api_key=GEMINI_API_KEY)
+            response = chain({"input_documents": docs_retrieved, "question": message}, return_only_outputs=True)
+            response_output = response['output_text']
+            
+            if not response_output or "answer is not available in the context" in response_output.lower():
+                response_output = get_direct_gemini_response(message, GEMINI_API_KEY)
+            
+            doc_similarity_score = 1.0 if response_output else 0.0
+            response_length_score = min(len(response_output) / 1000, 1.0)
+            reward = (doc_similarity_score * 0.7) + (response_length_score * 0.3)
+            RL_AGENT.update_q_value(state_key, chosen_action, reward)
+            RL_AGENT.save_model()
+            
+            def stream_gen():
+                for i in range(0, len(response_output), 20):
+                    yield response_output[i:i+20]
+            return StreamingResponse(stream_gen(), media_type="text/plain")
+            
+        except Exception as e:
+            def error_gen():
+                yield f"Error in processing: {str(e)}"
+            return StreamingResponse(error_gen(), media_type="text/plain")
+    
     else:
         try:
             response_output = get_direct_gemini_response(message, GEMINI_API_KEY)
@@ -431,4 +544,9 @@ async def generate_image(
         response = model.generate_content(image_prompt)
         return {"description": response.text}
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500) 
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+# Add health check endpoint
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "embedding_fallback": "enabled"}
