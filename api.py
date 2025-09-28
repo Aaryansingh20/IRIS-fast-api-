@@ -34,6 +34,11 @@ from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
 import google.generativeai as genai
 
+app = FastAPI()
+@app.get("/")
+async def root():
+    return {"message": "IRIS API is running"}
+
 # RLAgent class (copied from app.py, without Streamlit dependencies)
 class RLAgent:
     def __init__(self, learning_rate=0.1, discount_factor=0.9, exploration_rate=0.2):
@@ -263,10 +268,7 @@ def caption_image(image_file):
 
 
 # FastAPI app setup
-app = FastAPI()
-@app.get("/")
-async def root():
-    return {"message": "IRIS API is running"}
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -566,3 +568,4 @@ async def generate_image(
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "embedding_fallback": "enabled"}
+
