@@ -569,13 +569,13 @@ async def generate_image(
 async def health_check():
     return {"status": "healthy", "embedding_fallback": "enabled"}
 
-if __name__ == "__main__":
-    import os
-    import uvicorn
-    from dotenv import load_dotenv
+# if __name__ == "__main__":
+#     import os
+#     import uvicorn
+#     from dotenv import load_dotenv
 
-    load_dotenv()
-    port = int(os.environ.get("PORT", 10000))
-    host = os.environ.get("HOST", "0.0.0.0")
+#     load_dotenv()
+#     port = int(os.environ.get("PORT", 10000))
+#     host = os.environ.get("HOST", "0.0.0.0")
 
-    uvicorn.run("api:app", host=host, port=port, reload=False)
+#     uvicorn.run("api:app", host=host, port=port, reload=False)
